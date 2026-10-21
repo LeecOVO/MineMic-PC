@@ -1,0 +1,240 @@
+#include "ui/MainWindow.h"
+#include <QAction>
+#include <QApplication>
+#include <QCheckBox>
+#include <QClipboard>
+#include <QCloseEvent>
+#include <QComboBox>
+#include <QFormLayout>
+#include <QGroupBox>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QLineEdit>
+#include <QMenu>
+#include <QNetworkInterface>
+#include <QPainter>
+#include <QProgressBar>
+#include <QPushButton>
+#include <QRandomGenerator>
+#include <QSettings>
+#include <QSlider>
+#include <QSpinBox>
+#include <QSystemTrayIcon>
+#include <QTimer>
+#include <QVBoxLayout>
+#include <algorithm>
+
+namespace minemic {
+QIcon applicationIcon() {
+    QPixmap image(64, 64); image.fill(Qt::transparent);
+    QPainter painter(&image); painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(Qt::NoPen); painter.setBrush(QColor(42, 104, 210));
+    painter.drawRoundedRect(QRectF(1, 1, 62, 62), 14, 14);
+    painter.setBrush(Qt::white); painter.drawRoundedRect(QRectF(25, 12, 14, 27), 7, 7);
+    painter.setBrush(Qt::NoBrush); painter.setPen(QPen(Qt::white, 4, Qt::SolidLine, Qt::RoundCap));
+    painter.drawArc(QRectF(18, 23, 28, 23), 180 * 16, 180 * 16);
+    painter.drawLine(32, 46, 32, 53); painter.drawLine(24, 53, 40, 53);
+    return QIcon(image);
+}
+
+MainWindow::MainWindow() : output_(createAudioOutput()) {
+    setWindowTitle(QStringLiteral("MineMic"));
+    setWindowIcon(applicationIcon());
+    setMinimumSize(680, 640);
+    auto* root = new QWidget(this);
+    auto* layout = new QVBoxLayout(root); layout->setContentsMargins(24, 20, 24, 20); layout->setSpacing(14);
+    auto* title = new QLabel(QStringLiteral("MineMic"));
+    QFont titleFont = title->font(); titleFont.setPointSize(24); titleFont.setBold(true); title->setFont(titleFont);
+    layout->addWidget(title);
+    auto* subtitle = new QLabel(tr("把手机变成电脑麦克风 · 局域网连接"));
+    layout->addWidget(subtitle);
+
+    auto* routing = new QGroupBox(tr("音频输出"));
+    auto* routingLayout = new QVBoxLayout(routing);
+    auto* row = new QHBoxLayout;
+    devices_ = new QComboBox; devices_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    devices_->setMinimumContentsLength(30); row->addWidget(devices_, 1);
+    refresh_ = new QPushButton(tr("刷新")); row->addWidget(refresh_);
+    routingLayout->addLayout(row);
+    auto* routingHint = new QLabel(tr("选择虚拟声卡的播放端；在会议或游戏中选择它对应的录音端。\n选择实体扬声器时将直接播放手机声音。"));
+    routingHint->setWordWrap(true); routingHint->setMinimumHeight(44);
+    routingLayout->addWidget(routingHint);
+    auto* gainRow = new QHBoxLayout;
+    gainRow->addWidget(new QLabel(tr("音量")));
+    gain_ = new QSlider(Qt::Horizontal); gain_->setRange(0, 200);
+    QSettings settings;
+    gain_->setValue(std::clamp(settings.value(QStringLiteral("gain"), 100).toInt(), 0, 200));
+    buffer_.setGain(gain_->value() / 100.0f);
+    gainRow->addWidget(gain_, 1);
+    gainText_ = new QLabel(QStringLiteral("%1%").arg(gain_->value())); gainText_->setMinimumWidth(45);
+    gainRow->addWidget(gainText_);
+    muted_ = new QCheckBox(tr("静音")); gainRow->addWidget(muted_);
+    routingLayout->addLayout(gainRow);
+    meter_ = new QProgressBar; meter_->setRange(0, 32768); meter_->setValue(0);
+    meter_->setTextVisible(false); meter_->setMaximumHeight(10); routingLayout->addWidget(meter_);
+    layout->addWidget(routing);
+
+    auto* pairing = new QGroupBox(tr("手机连接"));
+    auto* form = new QFormLayout(pairing);
+    addresses_ = new QComboBox;
+    for (const auto& interface : QNetworkInterface::allInterfaces()) {
+        if (!(interface.flags() & QNetworkInterface::IsUp) || interface.flags() & QNetworkInterface::IsLoopBack) continue;
+        for (const auto& entry : interface.addressEntries()) {
+            if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol)
+                addresses_->addItem(entry.ip().toString());
+        }
+    }
+    if (!addresses_->count()) addresses_->addItem(QStringLiteral("127.0.0.1"));
+    form->addRow(tr("电脑地址"), addresses_);
+    port_ = new QSpinBox; port_->setRange(48721, 48721);
+    port_->setReadOnly(true); port_->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    port_->setValue(std::clamp(settings.value(QStringLiteral("port"), 48721).toInt(), 1024, 65535));
+    form->addRow(tr("连接端口"), port_);
+    connection_ = new QLineEdit; connection_->setReadOnly(true); connection_->setAccessibleName(tr("6 位配对码"));
+    QFont codeFont = connection_->font(); codeFont.setPointSize(26); codeFont.setBold(true);
+    connection_->setFont(codeFont); connection_->setAlignment(Qt::AlignCenter);
+    connection_->setMinimumHeight(56);
+    form->addRow(tr("配对码"), connection_);
+    auto* pairingButtons = new QHBoxLayout;
+    auto* copy = new QPushButton(tr("复制配对码"));
+    disconnect_ = new QPushButton(tr("断开当前手机")); disconnect_->setEnabled(false);
+    pairingButtons->addWidget(copy); pairingButtons->addWidget(disconnect_); pairingButtons->addStretch();
+    form->addRow(QString(), pairingButtons);
+    auto* networkHint = new QLabel(tr("手机输入 6 位配对码即可连接，也可手动输入上方 PC 地址。\n首台手机连接后保持独占；手动断开后自动更新配对码。"));
+    networkHint->setWordWrap(true); networkHint->setMinimumHeight(48); form->addRow(networkHint);
+    layout->addWidget(pairing);
+    status_ = new QLabel(tr("未启动")); status_->setWordWrap(true); status_->setTextFormat(Qt::PlainText);
+    layout->addWidget(status_);
+    statistics_ = new QLabel(tr("48 kHz · 单声道 · PCM16 · 10 ms/包"));
+    statistics_->setWordWrap(true); layout->addWidget(statistics_);
+    auto* bottom = new QHBoxLayout;
+    bottom->addStretch(); start_ = new QPushButton(tr("开始接收"));
+    start_->setDefault(true); start_->setMinimumHeight(34); bottom->addWidget(start_);
+    layout->addLayout(bottom); layout->addStretch(); setCentralWidget(root);
+
+    receiver_ = new Receiver(buffer_);
+    receiver_->moveToThread(&networkThread_);
+    connect(&networkThread_, &QThread::finished, receiver_, &QObject::deleteLater);
+    connect(receiver_, &Receiver::listening, this, [this](quint16) {
+        if (!busy_) return;
+        busy_ = false; setRunning(true); status_->setText(tr("正在等待手机连接"));
+    });
+    pairingCode_ = receiver_->pairingCode(); updateConnectionInfo();
+    connect(receiver_, &Receiver::pairingCodeChanged, this, [this](const QString& code) {
+        pairingCode_ = code; updateConnectionInfo();
+    });
+    connect(receiver_, &Receiver::peerChanged, this, [this](const QString& peer) { peerLabel_ = peer; });
+    connect(receiver_, &Receiver::connectionChanged, this, [this](bool locked, bool online) {
+        locked_ = locked; disconnect_->setEnabled(locked && running_);
+        if (running_) status_->setText(!locked ? tr("正在等待手机连接") : online
+            ? tr("已连接：%1 · 已独占").arg(peerLabel_)
+            : tr("连接中断，仍为 %1 保留；可等待原手机重连或手动断开。").arg(peerLabel_));
+    });
+    connect(receiver_, &Receiver::discoveryWarning, this, [this](const QString& message) { statistics_->setText(message); });
+    connect(receiver_, &Receiver::errorOccurred, this, &MainWindow::showError);
+    connect(receiver_, &Receiver::statistics, this,
+            [this](quint64 accepted, quint64 rejected, quint64 missing, quint64 late, quint64 resyncs, int queuedMs, int peak) {
+        if (!running_) return;
+        // No repaint or meter animation while the application is hidden in the tray.
+        if (isVisible()) {
+            meter_->setValue(peak);
+            statistics_->setText(tr("已收 %1 包 · 拒绝 %2 · 缺包 %3 · 迟到 %4 · 重缓冲 %5 · 排队 %6 ms")
+                .arg(accepted).arg(rejected).arg(missing).arg(late).arg(resyncs).arg(queuedMs));
+        }
+        const auto error = output_->takeError();
+        if (!error.isEmpty()) showError(error);
+    });
+    networkThread_.setObjectName(QStringLiteral("MineMic UDP")); networkThread_.start();
+    connect(start_, &QPushButton::clicked, this, [this] { if (running_) stop(); else start(); });
+    connect(refresh_, &QPushButton::clicked, this, &MainWindow::refreshDevices);
+    connect(port_, &QSpinBox::valueChanged, this, &MainWindow::updateConnectionInfo);
+    connect(addresses_, &QComboBox::currentTextChanged, this, &MainWindow::updateConnectionInfo);
+    connect(copy, &QPushButton::clicked, this, [this] { QApplication::clipboard()->setText(connection_->text()); });
+    connect(disconnect_, &QPushButton::clicked, this, [this] {
+        QMetaObject::invokeMethod(receiver_, &Receiver::manualDisconnect, Qt::QueuedConnection);
+    });
+    connect(gain_, &QSlider::valueChanged, this, [this](int value) {
+        buffer_.setGain(value / 100.0f); gainText_->setText(QStringLiteral("%1%").arg(value));
+    });
+    connect(muted_, &QCheckBox::toggled, this, [this](bool value) { buffer_.setMuted(value); });
+    refreshDevices();
+
+    if (QSystemTrayIcon::isSystemTrayAvailable()) {
+        tray_ = new QSystemTrayIcon(windowIcon(), this); tray_->setToolTip(QStringLiteral("MineMic"));
+        auto* menu = new QMenu(this);
+        menu->addAction(tr("显示 MineMic"), this, [this] { showNormal(); raise(); activateWindow(); });
+        menu->addAction(tr("停止接收"), this, &MainWindow::stop);
+        menu->addSeparator(); menu->addAction(tr("退出"), qApp, &QApplication::quit);
+        tray_->setContextMenu(menu);
+        connect(tray_, &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason reason) {
+            if (reason == QSystemTrayIcon::Trigger || reason == QSystemTrayIcon::DoubleClick) { showNormal(); raise(); activateWindow(); }
+        });
+        tray_->show();
+        auto* hint = new QLabel(tr("关闭窗口后继续在托盘运行；从托盘菜单退出。"));
+        hint->setWordWrap(true); layout->addWidget(hint);
+        QApplication::setQuitOnLastWindowClosed(false);
+    }
+}
+
+MainWindow::~MainWindow() {
+    stop(); networkThread_.quit(); networkThread_.wait();
+    QSettings settings;
+    settings.setValue(QStringLiteral("port"), port_->value());
+    settings.setValue(QStringLiteral("device"), devices_->currentData());
+    settings.setValue(QStringLiteral("gain"), gain_->value());
+
+}
+
+void MainWindow::refreshDevices() {
+    const auto previous = devices_->currentData().toString();
+    const auto preferred = previous.isEmpty() ? QSettings().value(QStringLiteral("device")).toString() : previous;
+    devices_->clear(); devices_->addItem(tr("请选择输出设备"), QString());
+    QString error;
+    for (const auto& device : output_->devices(error)) devices_->addItem(device.name, device.id);
+    const int index = devices_->findData(preferred);
+    if (index > 0) devices_->setCurrentIndex(index);
+    if (!error.isEmpty()) status_->setText(error);
+}
+
+void MainWindow::updateConnectionInfo() {
+    connection_->setText(pairingCode_);
+    connection_->setCursorPosition(0);
+}
+
+void MainWindow::setRunning(bool running) {
+    running_ = running; start_->setEnabled(!busy_);
+    start_->setText(running ? tr("停止接收") : tr("开始接收"));
+    devices_->setEnabled(!running && !busy_); refresh_->setEnabled(!running && !busy_);
+    port_->setEnabled(false); disconnect_->setEnabled(running && locked_);
+    if (tray_) tray_->setToolTip(running ? tr("MineMic · 接收中") : QStringLiteral("MineMic"));
+}
+
+void MainWindow::start() {
+    if (busy_ || running_) return;
+    const auto id = devices_->currentData().toString();
+    if (id.isEmpty()) { status_->setText(tr("请先选择虚拟声卡播放端，或选择扬声器进行试听。")); return; }
+    buffer_.reset();
+    QString error;
+    if (!output_->start(id, buffer_, error)) { showError(error); return; }
+    busy_ = true; setRunning(false); status_->setText(tr("正在启动接收…"));
+    const auto port = static_cast<quint16>(port_->value());
+    QMetaObject::invokeMethod(receiver_, [this, port] { receiver_->startListening(port); }, Qt::QueuedConnection);
+}
+
+void MainWindow::stop() {
+    if (networkThread_.isRunning()) QMetaObject::invokeMethod(receiver_, &Receiver::stopListening, Qt::BlockingQueuedConnection);
+    output_->stop(); buffer_.reset(); busy_ = false; setRunning(false);
+    meter_->setValue(0); status_->setText(tr("已停止"));
+}
+
+void MainWindow::showError(const QString& error) {
+    // Device failures must not release a connected phone's ownership.
+    output_->stop(); busy_ = false; setRunning(running_);
+    status_->setText(tr("音频或网络异常：%1。已连接手机的占用保留，需手动断开。").arg(error));
+}
+
+void MainWindow::closeEvent(QCloseEvent* event) {
+    if (tray_ && tray_->isVisible()) { hide(); event->ignore(); }
+    else { stop(); event->accept(); }
+}
+}

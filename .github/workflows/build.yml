@@ -1,0 +1,29 @@
+name: Build and test
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  portable-core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake --preset core-tests
+      - run: cmake --build --preset core-tests
+      - run: ctest --preset core-tests
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - run: python -m pip install aqtinstall ninja
+      - run: python -m aqt install-qt windows desktop 6.10.3 win64_msvc2022_64 --archives qtbase -O "${{ runner.temp }}/Qt"
+      - shell: pwsh
+        run: ./scripts/build-windows.ps1 -QtPrefix "${{ runner.temp }}/Qt/6.10.3/msvc2022_64" -OutputDirectory ./dist-ci
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MineMic-Windows-development-portable
+          path: dist-ci/portable
+          if-no-files-found: error

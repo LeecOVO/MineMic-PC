@@ -1,0 +1,38 @@
+{
+  "version": 5,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "core-tests",
+      "displayName": "Portable core tests (no Qt)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/core-tests",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "MINEMIC_BUILD_APP": "OFF", "BUILD_TESTING": "ON" }
+    },
+    {
+      "name": "desktop",
+      "displayName": "Qt desktop development",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/desktop",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "BUILD_TESTING": "ON" }
+    },
+    {
+      "name": "windows-single-file",
+      "inherits": "desktop",
+      "displayName": "Windows static Qt + static CRT",
+      "binaryDir": "${sourceDir}/build/windows-single-file",
+      "cacheVariables": { "MINEMIC_SINGLE_FILE": "ON" },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "core-tests", "configurePreset": "core-tests" },
+    { "name": "desktop", "configurePreset": "desktop" },
+    { "name": "windows-single-file", "configurePreset": "windows-single-file" }
+  ],
+  "testPresets": [
+    { "name": "core-tests", "configurePreset": "core-tests", "output": { "outputOnFailure": true } },
+    { "name": "desktop", "configurePreset": "desktop", "output": { "outputOnFailure": true } },
+    { "name": "windows-single-file", "configurePreset": "windows-single-file", "output": { "outputOnFailure": true } }
+  ]
+}
