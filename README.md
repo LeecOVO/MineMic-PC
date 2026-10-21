@@ -1,5 +1,7 @@
 # MineMic-PC
 
+**0.0.1-ea.1 · Early Access · 首个可用版本**。用户已确认本次 iPhone → Windows 卡顿修复验收通过；仍处于初始开发阶段。Windows 资源占用和其他设备组合仍需测试。版本规则见 [版本约定](docs/VERSIONING.md)。
+
 MineMic 的独立电脑端：C++17 + Qt 6 Widgets，Windows 优先，手机端在相邻 `MineMic` Kotlin 项目中。
 
 ## 当前功能
@@ -35,7 +37,7 @@ ctest --preset desktop
 
 仅运行无 Qt 的核心测试：使用 `core-tests` 预设。设置 `-DMINEMIC_DEVICE_TESTS=ON` 可增加真实输出设备的静音测试。
 
-Windows 单 EXE 路径、静态 Qt/CRT 及许可说明见 [BUILDING.md](docs/BUILDING.md)。构建选项会拒绝动态 Qt，脚本检查 Qt/编译器运行库导入。**尚未在 Windows 生成和验收单文件 EXE**；单文件也不免除虚拟声卡的系统安装。
+Windows 单 EXE 路径、静态 Qt/CRT 及许可说明见 [BUILDING.md](docs/BUILDING.md)。构建选项会拒绝动态 Qt，脚本检查 Qt/编译器运行库导入。本次用户已打包单文件版和绿色版；本工具环境未独立验收 Windows 产物；单文件也不免除虚拟声卡的系统安装。
 
 测试发送器（在手机完成真实设备验收前验证传输）：
 

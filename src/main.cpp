@@ -1,4 +1,5 @@
 #include "ui/MainWindow.h"
+#include "Version.h"
 #include <QApplication>
 #include <QSettings>
 #include <QTemporaryDir>
@@ -8,7 +9,7 @@ int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
     QApplication::setOrganizationName(QStringLiteral("aiaixyz"));
     QApplication::setApplicationName(QStringLiteral("MineMic-PC"));
-    QApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    QApplication::setApplicationVersion(QStringLiteral(MINEMIC_VERSION));
     QApplication::setWindowIcon(minemic::applicationIcon());
     const bool smokeTest = app.arguments().contains(QStringLiteral("--smoke-test"));
     QTemporaryDir temporarySettings;

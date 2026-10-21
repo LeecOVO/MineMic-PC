@@ -9,3 +9,5 @@
 - Preserve fixed buffer limits and bounded network work. Avoid allocations or Qt UI calls in device audio callbacks. The current short mutex is intentional, not a hard real-time guarantee.
 - Checks: `cmake --preset core-tests`, `cmake --build --preset core-tests`, `ctest --preset core-tests`. With Qt configured: `cmake --preset desktop -DCMAKE_PREFIX_PATH=...`, build/test the `desktop` preset. The optional Python interoperability test is discovered automatically.
 - Read `docs/VALIDATION.md` for actual evidence and `docs/ROADMAP.md` for remaining device acceptance. Do not infer phone, Windows, performance, or driver validation from macOS/loopback tests.
+
+- Version baseline: 0.0.1, development preview / EA (0.0.1-ea.1). Read docs/VERSIONING.md. CMakeLists.txt generates application and Windows resource versions; build/install success does not imply release readiness.

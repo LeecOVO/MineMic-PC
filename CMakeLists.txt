@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.24)
-project(MineMicPC VERSION 0.1.0 LANGUAGES CXX)
+project(MineMicPC VERSION 0.0.1 LANGUAGES CXX)
+set(MINEMIC_PRERELEASE "ea.1")
+set(MINEMIC_BUILD_NUMBER 4)
+set(MINEMIC_VERSION "${PROJECT_VERSION}-${MINEMIC_PRERELEASE}")
+configure_file(resources/Version.h.in generated/Version.h @ONLY)
+configure_file(resources/windows.rc.in generated/windows.rc @ONLY)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -54,9 +59,10 @@ if(MINEMIC_BUILD_APP)
         src/main.cpp src/ui/MainWindow.cpp src/ui/MainWindow.h
         src/audio/AudioOutput.h)
     target_link_libraries(MineMic PRIVATE minemic_network minemic_audio Qt6::Widgets)
+    target_include_directories(MineMic PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
     if(WIN32)
         target_sources(minemic_audio PRIVATE src/audio/WasapiOutput.cpp)
-        target_sources(MineMic PRIVATE resources/windows.rc)
+        target_sources(MineMic PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated/windows.rc")
         target_compile_definitions(minemic_audio PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
         target_link_libraries(minemic_audio PRIVATE ole32 uuid avrt propsys)
         if(MINEMIC_SINGLE_FILE)
@@ -74,7 +80,8 @@ if(MINEMIC_BUILD_APP)
         set_target_properties(MineMic PROPERTIES
             MACOSX_BUNDLE_BUNDLE_NAME "MineMic"
             MACOSX_BUNDLE_GUI_IDENTIFIER "com.aiaixyz.minemic.pc"
-            MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}")
+            MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+            MACOSX_BUNDLE_BUNDLE_VERSION "${MINEMIC_BUILD_NUMBER}")
     else()
         target_sources(minemic_audio PRIVATE src/audio/UnsupportedOutput.cpp)
     endif()

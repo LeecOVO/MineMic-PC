@@ -2,6 +2,10 @@
 
 日期：2026-10-21，Asia/Shanghai。主机为 Apple Silicon macOS，Apple Clang 21、Qt 6.10.3、CMake 4.4.4、Xcode 27。两端协议现为 v2；初版 v1 测试结果不作为当前版本验收。
 
+## 当前开发版本
+
+基础版本 0.0.1，完整版本 0.0.1-ea.1，首个可用 EA 版本，非稳定版。已统一 CMake、界面和 Windows 资源版本来源；macOS Release 编译及现有 5 项 CTest 再次通过。Windows 版本资源已修改，但未在本机执行 MSVC/RC 编译。手机音频修复详情在相邻手机仓库的 docs/AUDIO_PIPELINE.md；用户已确认修复后的真实 iPhone → Windows 卡顿验收通过；量化延迟和全部设备兼容性仍未验收。
+
 ## PC 已验证
 
 - Release 编译通过。

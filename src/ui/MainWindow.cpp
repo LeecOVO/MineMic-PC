@@ -1,5 +1,8 @@
 #include "ui/MainWindow.h"
 #include <QAction>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QTextBrowser>
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
@@ -38,7 +41,7 @@ QIcon applicationIcon() {
 }
 
 MainWindow::MainWindow() : output_(createAudioOutput()) {
-    setWindowTitle(QStringLiteral("MineMic"));
+    setWindowTitle(QStringLiteral("MineMic %1 · Early Access").arg(QApplication::applicationVersion()));
     setWindowIcon(applicationIcon());
     setMinimumSize(680, 640);
     auto* root = new QWidget(this);
@@ -46,7 +49,7 @@ MainWindow::MainWindow() : output_(createAudioOutput()) {
     auto* title = new QLabel(QStringLiteral("MineMic"));
     QFont titleFont = title->font(); titleFont.setPointSize(24); titleFont.setBold(true); title->setFont(titleFont);
     layout->addWidget(title);
-    auto* subtitle = new QLabel(tr("把手机变成电脑麦克风 · 局域网连接"));
+    auto* subtitle = new QLabel(tr("%1 · Early Access · 首个可用版本\n把手机变成电脑麦克风 · 局域网连接").arg(QApplication::applicationVersion()));
     layout->addWidget(subtitle);
 
     auto* routing = new QGroupBox(tr("音频输出"));
@@ -108,7 +111,9 @@ MainWindow::MainWindow() : output_(createAudioOutput()) {
     statistics_ = new QLabel(tr("48 kHz · 单声道 · PCM16 · 10 ms/包"));
     statistics_->setWordWrap(true); layout->addWidget(statistics_);
     auto* bottom = new QHBoxLayout;
-    bottom->addStretch(); start_ = new QPushButton(tr("开始接收"));
+    auto* about = new QPushButton(tr("关于 MineMic"));
+    connect(about, &QPushButton::clicked, this, &MainWindow::showAbout);
+    bottom->addWidget(about); bottom->addStretch(); start_ = new QPushButton(tr("开始接收"));
     start_->setDefault(true); start_->setMinimumHeight(34); bottom->addWidget(start_);
     layout->addLayout(bottom); layout->addStretch(); setCentralWidget(root);
 
@@ -164,7 +169,8 @@ MainWindow::MainWindow() : output_(createAudioOutput()) {
         auto* menu = new QMenu(this);
         menu->addAction(tr("显示 MineMic"), this, [this] { showNormal(); raise(); activateWindow(); });
         menu->addAction(tr("停止接收"), this, &MainWindow::stop);
-        menu->addSeparator(); menu->addAction(tr("退出"), qApp, &QApplication::quit);
+        menu->addSeparator(); menu->addAction(tr("关于 MineMic"), this, &MainWindow::showAbout);
+        menu->addAction(tr("退出"), qApp, &QApplication::quit);
         tray_->setContextMenu(menu);
         connect(tray_, &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason reason) {
             if (reason == QSystemTrayIcon::Trigger || reason == QSystemTrayIcon::DoubleClick) { showNormal(); raise(); activateWindow(); }
@@ -183,6 +189,32 @@ MainWindow::~MainWindow() {
     settings.setValue(QStringLiteral("device"), devices_->currentData());
     settings.setValue(QStringLiteral("gain"), gain_->value());
 
+}
+
+void MainWindow::showAbout() {
+    // Modeless: a user can inspect project information while audio keeps running.
+    auto* dialog = new QDialog(this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(tr("关于 MineMic"));
+    dialog->resize(490, 360);
+    auto* layout = new QVBoxLayout(dialog);
+    auto* info = new QTextBrowser(dialog);
+    info->setOpenExternalLinks(true);
+    info->setHtml(tr(
+        "<h2>MineMic-PC</h2>"
+        "<p><b>版本：%1</b><br>Early Access · 首个可用版本<br>音频协议：v2</p>"
+        "<p>将手机作为电脑麦克风的局域网音频接收端。<br>C++17 + Qt Widgets，无需云服务器。</p>"
+        "<p>作者：LeeC<br>原创代码许可：MIT License<br>© 2026 LeeC</p>"
+        "<p><a href=\"https://github.com/LeecOVO/MineMic-PC\">PC 项目 / 问题反馈</a> · "
+        "<a href=\"https://github.com/LeecOVO/MineMic\">手机项目</a> · "
+        "<a href=\"https://github.com/LeecOVO/MineMic-PC/blob/master/LICENSE\">MIT 协议</a></p>"
+        "<p>系统麦克风路由需另行安装虚拟声卡。Qt 与第三方驱动各自遵循其许可证。</p>"
+    ).arg(QApplication::applicationVersion().toHtmlEscaped()));
+    layout->addWidget(info);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
+    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
+    layout->addWidget(buttons);
+    dialog->show();
 }
 
 void MainWindow::refreshDevices() {

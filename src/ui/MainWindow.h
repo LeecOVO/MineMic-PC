@@ -24,6 +24,7 @@ public:
 protected:
     void closeEvent(QCloseEvent* event) override;
 private:
+    void showAbout();
     void refreshDevices();
     void updateConnectionInfo();
     void setRunning(bool running);

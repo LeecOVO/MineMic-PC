@@ -1,0 +1,2 @@
+#pragma once
+#define MINEMIC_VERSION "@MINEMIC_VERSION@"
