@@ -52,4 +52,10 @@ python3 tools/send_test_audio.py 192.168.1.100 --code 038215 --seconds 10
 
 目录：`src/core` 协议与缓冲，`src/network` 控制/音频/发现，`src/audio` 原生后端，`src/ui` 桌面界面，`tests` 回归测试，`tools` 参考发送器，`scripts` 发布构建。
 
-缓冲固定上限，隐藏窗口不刷新电平，设备回调不动态分配；当前使用短时互斥锁，不宣称硬实时。Windows 内存、CPU、体积和端到端延迟尚未实测。项目自身许可证尚未指定，Qt 和第三方驱动分别按其许可分发。
+缓冲固定上限，隐藏窗口不刷新电平，设备回调不动态分配；当前使用短时互斥锁，不宣称硬实时。Windows 内存、CPU、体积和端到端延迟尚未实测。
+
+## 许可证
+
+本项目原创代码采用 [MIT License](LICENSE)，版权所有 © 2026 LeeC。第三方组件、依赖及工具保留其各自的版权声明与许可证。
+
+Qt 和第三方虚拟声卡驱动的许可独立于本项目的 MIT 许可，分发说明见 [BUILDING.md](docs/BUILDING.md#qt-许可)。

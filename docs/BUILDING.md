@@ -54,7 +54,7 @@ Windows 请在 VS 2022 的 x64 Developer PowerShell 中：
 
 ## Qt 许可
 
-Qt 有开源及商业许可选项。静态发布前应按实际选用的许可准备相应声明、Qt 源码及必要的可重链接材料，或使用适用的商业授权。此仓库没有替项目指定自身许可证，也没有宣称静态链接必然允许闭源分发。
+Qt 有开源及商业许可选项。静态发布前应按实际选用的许可准备相应声明、Qt 源码及必要的可重链接材料，或使用适用的商业授权。本项目原创代码采用 [MIT License](../LICENSE)；Qt 的许可与分发要求仍独立适用。
 
 参考：[Qt licensing](https://doc.qt.io/qt-6/licensing.html)、[Qt 开源许可 FAQ](https://www.qt.io/faq/qt-open-source-licensing)。
 
