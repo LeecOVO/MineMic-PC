@@ -1,36 +1,34 @@
 # MineMic-PC
 
-**已发布基线：0.0.1-ea.1 · Early Access · 首个可用版本**。用户已确认本次 iPhone → Windows 卡顿修复验收通过；仍处于初始开发阶段。Windows 资源占用和其他设备组合仍需测试。版本规则见 [版本约定](docs/VERSIONING.md)。
+MineMic 的独立电脑端，采用 C++17 + Qt Widgets，通过局域网接收 [移动端](https://github.com/LeecOVO/MineMic) 的麦克风声音。Windows 优先，支持 macOS 音频输出；Linux 音频后端尚未实现。无需云服务器、账户或 JVM。
 
-**当前开发：0.1.0-dev.1**，新增按需 Windows 外放参考，供手机执行可选回声抑制；仍需实机与长时质量验收。
+已发布版本：**0.0.1-ea.1 · Early Access**。当前开发版本：**0.1.0-dev.1**。项目处于初始开发阶段，版本规则见 [VERSIONING.md](docs/VERSIONING.md)。
 
-MineMic 的独立电脑端：C++17 + Qt 6 Widgets，Windows 优先，手机端在相邻 `MineMic` Kotlin 项目中。
+## 使用
 
-## 当前功能
+1. 手机与电脑连接同一局域网。
+2. PC 选择音频输出设备，点击“开始接收”。
+3. 手机输入 PC 显示的 **6 位配对码**；也可手动填写 PC 的 IPv4 地址，默认端口为 48721。
+4. 首台手机独占连接，其他手机无法抢占。网络中断后保留占用，原手机可自动重连。
+5. 手机或 PC 主动断开后释放占用，并更新配对码。
 
-- PC 显示 **6 位数字配对码**，手机在同一局域网输入配对码连接。
-- 可手动输入 PC IPv4（默认 48721），按产品要求不另输配对码。
-- 首台成功连接的手机独占 PC；拒绝其他手机，不允许抢占。
-- 断网、TCP 中断、心跳超时只标记异常，保留所有权和配对码；原手机凭 token 重连。
-- 手机/PC 手动断开时释放连接，立刻更新为不同的新配对码，旧码失效。
-- Qt Widgets 中文界面、系统托盘、音量、静音、电平、有界音频缓冲。
-- Windows WASAPI 输出；macOS Core Audio 输出；Linux 音频后端待实现。
-- 可选的回声参考设备选择；仅手机开启 AEC 时采集，支持接收中切换实体扬声器。算法在手机运行，PC 不集成 APM。
-- TCP 控制 + UDP PCM 音频，DNS-SD/mDNS 自动发现，无云服务器、账户或 JVM。
+作为系统麦克风使用时，需单独安装虚拟声卡：MineMic 输出到其播放端（例如 `CABLE Input`），会议、游戏或录音软件使用对应的录音端（例如 `CABLE Output`）。选择实体扬声器可以试听声音。
 
-## 将手机作为系统麦克风
+Windows 提供单文件版与压缩版。单文件版运行 `MineMic.exe`；压缩版需完整解压并保留依赖文件。两种分发均不包含虚拟声卡驱动。
 
-1. PC 先独立安装一套虚拟音频线/虚拟声卡。仓库不打包第三方驱动，也没有 MineMic 自有驱动。
-2. MineMic 选择虚拟声卡的**播放端**，例如 `CABLE Input`，点击“开始接收”。
-3. 手机使用同一局域网，输入 PC 的 6 位码；也可手动填 PC IPv4。
-4. 会议、游戏或录音软件选择配对的**录音端**，例如 `CABLE Output`。
-5. PC 默认 TCP/UDP 48721；自动发现还需要 mDNS UDP 5353。程序不会自动修改防火墙。
+## 功能与连接
 
-选择实体扬声器只用于试听，不等于系统虚拟麦克风验收。音频和控制目前未加密，适用于可信局域网。手机进程退出后，PC 不自动释放占用，可在 PC 手动断开。
+- 输出设备选择、音量、静音、电平及连接统计。
+- 系统托盘运行，关闭主窗口后可继续接收。
+- Windows WASAPI、macOS Core Audio 原生音频输出。
+- 开发版支持按需采集 Windows 外放参考，供手机执行可选回声抑制；可选择实际使用的扬声器，算法在手机运行。
+- TCP 控制与 UDP PCM 音频使用 48721 端口，自动发现使用 mDNS UDP 5353。程序不会自动修改防火墙。
 
-## 开发与发布
+传输尚未加密，请在可信局域网使用。手机进程退出后，PC 仍保留占用，可在 PC 手动断开。Linux 音频、不同设备兼容性和开发版回声参考仍需继续测试。
 
-需要 CMake 3.24+、Ninja、C++17、Qt 6.5+ qtbase；本机验证使用 Qt 6.10.3。Windows 当前使用 MSVC 2022。
+## 构建与测试
+
+需要 CMake 3.24+、Ninja、C++17 和 Qt 6.5+ qtbase。Windows 使用 Visual Studio 2022 C++ x64 工具链。
 
 ```sh
 cmake --preset desktop -DCMAKE_PREFIX_PATH=/path/to/Qt/6.10.3/macos
@@ -38,29 +36,31 @@ cmake --build --preset desktop
 ctest --preset desktop
 ```
 
-仅运行无 Qt 的核心测试：使用 `core-tests` 预设。设置 `-DMINEMIC_DEVICE_TESTS=ON` 可增加真实输出设备的静音测试。
+无需 Qt 的核心测试：
 
-Windows 单 EXE 路径、静态 Qt/CRT 及许可说明见 [BUILDING.md](docs/BUILDING.md)。构建选项会拒绝动态 Qt，脚本检查 Qt/编译器运行库导入。本次用户已打包单文件版和压缩版；本工具环境未独立验收 Windows 产物；单文件也不免除虚拟声卡的系统安装。
+```sh
+cmake --preset core-tests
+cmake --build --preset core-tests
+ctest --preset core-tests
+```
 
-测试发送器（在手机完成真实设备验收前验证传输）：
+设置 `-DMINEMIC_DEVICE_TESTS=ON` 可增加输出设备静音测试。音频测试发送器：
 
 ```sh
 python3 tools/send_test_audio.py 192.168.1.100 --code 038215 --seconds 10
 # 手动 IP：省略 --code
 ```
 
-## 文档
+Windows 打包、静态 Qt/CRT 和单 EXE 构建见 [BUILDING.md](docs/BUILDING.md)。协议和兼容性见 [PROTOCOL.md](docs/PROTOCOL.md)。
 
-- [协议与独占规则](docs/PROTOCOL.md)
-- [实际验证结果](docs/VALIDATION.md)
-- [后续真机验收](docs/ROADMAP.md)
+## 项目结构
 
-目录：`src/core` 协议与缓冲，`src/network` 控制/音频/发现，`src/audio` 原生后端，`src/ui` 桌面界面，`tests` 回归测试，`tools` 参考发送器，`scripts` 发布构建。
-
-缓冲固定上限，隐藏窗口不刷新电平，设备回调不动态分配；当前使用短时互斥锁，不宣称硬实时。Windows 内存、CPU、体积和端到端延迟尚未实测。
+- `src/core`：协议与有界缓冲。
+- `src/network`：会话、传输和发现。
+- `src/audio`：原生音频后端。
+- `src/ui`：桌面界面。
+- `tests`、`tools`、`scripts`：测试、参考发送器和构建工具。
 
 ## 许可证
 
-本项目原创代码采用 [MIT License](LICENSE)，版权所有 © 2026 LeeC。第三方组件、依赖及工具保留其各自的版权声明与许可证。
-
-Qt 和第三方虚拟声卡驱动的许可独立于本项目的 MIT 许可，分发说明见 [BUILDING.md](docs/BUILDING.md#qt-许可)。
+原创代码采用 [MIT License](LICENSE)，版权所有 © 2026 LeeC。Qt 和第三方虚拟声卡分别遵循其许可证，分发要求见 [BUILDING.md](docs/BUILDING.md#qt-许可)。
