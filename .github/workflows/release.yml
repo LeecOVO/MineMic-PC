@@ -1,0 +1,109 @@
+name: Windows release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        edition: [compressed, single-file]
+    env:
+      QT_VERSION: 6.10.3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - run: python -m pip install aqtinstall ninja
+      - name: Download and verify Qt source
+        shell: pwsh
+        run: |
+          $archive = "$env:RUNNER_TEMP/qtbase-everywhere-src-$env:QT_VERSION.tar.xz"
+          Invoke-WebRequest "https://download.qt.io/archive/qt/6.10/$env:QT_VERSION/submodules/qtbase-everywhere-src-$env:QT_VERSION.tar.xz" -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ine '383dc907816338f0cba72088a524c07458dfc69ce684ca9132fcc4fe91c24b0b') { throw 'Qt source checksum mismatch' }
+          tar -xf $archive -C "$env:RUNNER_TEMP"
+          if ($LASTEXITCODE -ne 0) { throw 'Qt source extraction failed' }
+      - name: Install shared Qt
+        if: matrix.edition == 'compressed'
+        run: python -m aqt install-qt windows desktop 6.10.3 win64_msvc2022_64 --archives qtbase -O "${{ runner.temp }}/Qt"
+      - uses: actions/cache@v4
+        if: matrix.edition == 'single-file'
+        id: static-qt
+        with:
+          path: ${{ runner.temp }}/qt-static
+          key: windows-msvc2022-qt-6.10.3-static-${{ hashFiles('scripts/build-static-qt.ps1') }}
+      - name: Build static Qt
+        if: matrix.edition == 'single-file' && steps.static-qt.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./scripts/build-static-qt.ps1 -QtBaseSource "$env:RUNNER_TEMP/qtbase-everywhere-src-$env:QT_VERSION" -InstallDirectory "$env:RUNNER_TEMP/qt-static" -BuildDirectory "$env:RUNNER_TEMP/qt-static-build"
+      - name: Build and test MineMic
+        shell: pwsh
+        run: |
+          if ('${{ matrix.edition }}' -eq 'single-file') {
+            ./scripts/build-windows.ps1 -QtPrefix "$env:RUNNER_TEMP/qt-static" -SingleFile -BuildDirectory ./build/release -OutputDirectory ./dist-release
+          } else {
+            ./scripts/build-windows.ps1 -QtPrefix "$env:RUNNER_TEMP/Qt/$env:QT_VERSION/msvc2022_64" -BuildDirectory ./build/release -OutputDirectory ./dist-release
+          }
+      - name: Package release assets
+        shell: pwsh
+        run: |
+          $baseVersion = (Select-String -Path CMakeLists.txt -Pattern 'project\(MineMicPC VERSION ([0-9.]+)').Matches.Groups[1].Value
+          $prerelease = (Select-String -Path CMakeLists.txt -Pattern 'set\(MINEMIC_PRERELEASE "([^"]+)"').Matches.Groups[1].Value
+          $version = "$baseVersion-$prerelease"
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") { throw 'Tag and application version do not match' }
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          $qtSource = "$env:RUNNER_TEMP/qtbase-everywhere-src-$env:QT_VERSION"
+          if ('${{ matrix.edition }}' -eq 'single-file') {
+            Copy-Item ./dist-release/single-file/MineMic.exe "artifacts/MineMic-PC-$version-windows-x64.exe"
+            Copy-Item "$env:RUNNER_TEMP/qtbase-everywhere-src-$env:QT_VERSION.tar.xz" artifacts/
+            New-Item -ItemType Directory -Force ./build/license-notices/Qt | Out-Null
+            Copy-Item LICENSE ./build/license-notices/MineMic-LICENSE.txt
+            Copy-Item "$qtSource/LICENSES/*" ./build/license-notices/Qt -Recurse
+            Compress-Archive -Path ./build/license-notices/* -DestinationPath "artifacts/MineMic-PC-$version-licenses.zip"
+          } else {
+            Copy-Item LICENSE ./dist-release/portable/MineMic-LICENSE.txt
+            Copy-Item "$qtSource/LICENSES" ./dist-release/portable/Qt-LICENSES -Recurse
+            Compress-Archive -Path ./dist-release/portable/* -DestinationPath "artifacts/MineMic-PC-$version-windows-x64.zip"
+          }
+          Get-ChildItem artifacts -File | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            [IO.File]::WriteAllText("$($_.FullName).sha256", "$hash  $($_.Name)`n")
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-${{ matrix.edition }}
+          path: artifacts/*
+          if-no-files-found: error
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-windows-*
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          prerelease: true
+          name: MineMic-PC ${{ github.ref_name }}
+          body_path: docs/releases/${{ github.ref_name }}.md
+          files: artifacts/*
+          fail_on_unmatched_files: true

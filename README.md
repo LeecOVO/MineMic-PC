@@ -2,7 +2,7 @@
 
 MineMic 的独立电脑端，采用 C++17 + Qt Widgets，通过局域网接收 [移动端](https://github.com/LeecOVO/MineMic) 的麦克风声音。Windows 优先，支持 macOS 音频输出；Linux 音频后端尚未实现。无需云服务器、账户或 JVM。
 
-已发布版本：**0.0.1-ea.1 · Early Access**。当前开发版本：**0.1.0-dev.1**。项目处于初始开发阶段，版本规则见 [VERSIONING.md](docs/VERSIONING.md)。
+当前版本：**0.1.0-ea.1 · Early Access**。项目处于初始开发阶段，版本规则见 [VERSIONING.md](docs/VERSIONING.md)。
 
 ## 使用
 
@@ -21,10 +21,10 @@ Windows 提供单文件版与压缩版。单文件版运行 `MineMic.exe`；压�
 - 输出设备选择、音量、静音、电平及连接统计。
 - 系统托盘运行，关闭主窗口后可继续接收。
 - Windows WASAPI、macOS Core Audio 原生音频输出。
-- 开发版支持按需采集 Windows 外放参考，供手机执行可选回声抑制；可选择实际使用的扬声器，算法在手机运行。
+- 支持按需采集 Windows 外放参考，供手机执行可选回声抑制；可选择实际使用的扬声器，算法在手机运行。
 - TCP 控制与 UDP PCM 音频使用 48721 端口，自动发现使用 mDNS UDP 5353。程序不会自动修改防火墙。
 
-传输尚未加密，请在可信局域网使用。手机进程退出后，PC 仍保留占用，可在 PC 手动断开。Linux 音频、不同设备兼容性和开发版回声参考仍需继续测试。
+传输尚未加密，请在可信局域网使用。手机进程退出后，PC 仍保留占用，可在 PC 手动断开。Linux 音频、不同设备兼容性和回声参考仍需继续测试。
 
 ## 构建与测试
 

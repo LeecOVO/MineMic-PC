@@ -1,6 +1,6 @@
 # 版本管理
 
-项目遵循 [SemVer 2.0.0](https://semver.org/lang/zh-CN/)。已发布版本为 `0.0.1-ea.1`，当前开发版本为 `0.1.0-dev.1`。
+项目遵循 [SemVer 2.0.0](https://semver.org/lang/zh-CN/)。当前版本为 `0.1.0-ea.1`，属于 Early Access 预发布。
 
 - `0.y.z` 表示初始开发阶段，接口仍可能变化。
 - `-dev.N` 表示开发快照，`-ea.N` 表示 Early Access 预发布。有内容变化的新分发递增相应编号，不覆盖已发布版本。
