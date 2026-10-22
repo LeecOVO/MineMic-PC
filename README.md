@@ -1,6 +1,8 @@
 # MineMic-PC
 
-**0.0.1-ea.1 · Early Access · 首个可用版本**。用户已确认本次 iPhone → Windows 卡顿修复验收通过；仍处于初始开发阶段。Windows 资源占用和其他设备组合仍需测试。版本规则见 [版本约定](docs/VERSIONING.md)。
+**已发布基线：0.0.1-ea.1 · Early Access · 首个可用版本**。用户已确认本次 iPhone → Windows 卡顿修复验收通过；仍处于初始开发阶段。Windows 资源占用和其他设备组合仍需测试。版本规则见 [版本约定](docs/VERSIONING.md)。
+
+**当前开发：0.1.0-dev.1**，新增按需 Windows 外放参考，供手机执行可选回声抑制；仍需实机与长时质量验收。
 
 MineMic 的独立电脑端：C++17 + Qt 6 Widgets，Windows 优先，手机端在相邻 `MineMic` Kotlin 项目中。
 
@@ -13,6 +15,7 @@ MineMic 的独立电脑端：C++17 + Qt 6 Widgets，Windows 优先，手机端�
 - 手机/PC 手动断开时释放连接，立刻更新为不同的新配对码，旧码失效。
 - Qt Widgets 中文界面、系统托盘、音量、静音、电平、有界音频缓冲。
 - Windows WASAPI 输出；macOS Core Audio 输出；Linux 音频后端待实现。
+- 可选的回声参考设备选择；仅手机开启 AEC 时采集，支持接收中切换实体扬声器。算法在手机运行，PC 不集成 APM。
 - TCP 控制 + UDP PCM 音频，DNS-SD/mDNS 自动发现，无云服务器、账户或 JVM。
 
 ## 将手机作为系统麦克风

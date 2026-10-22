@@ -27,3 +27,11 @@
 Windows MSVC/WASAPI、干净系统单 EXE、第三方虚拟声卡路由、真实 Android/iPhone 录音、局域网权限恢复、锁屏/来电、持续运行、端到端延迟、Windows CPU/内存/体积。macOS 静音输出不等于真实手机系统麦克风成功。
 
 `build*`、APK、framework、模拟器应用、日志和本机配置均不纳入 Git。工具链临时目录位于 `/tmp/minemic-pc-*`。没有远端推送；初始源代码以各自本地仓库提交供用户后续推送。
+
+## 2026-10-22：0.1.0-dev.1 开发增量
+
+已发布基线仍为 0.0.1-ea.1。本轮新增可选 Windows PCM 立体声参考与时钟/能力协商，手机执行 WebRTC AEC/NS。外放参考使用独立有界队列和工作线程，不在网络线程等待 COM 设备初始化/关闭；关闭/断网停止参考，继续保留原有独占规则。UI 新增可在接收中更改的实际扬声器选择，版本标为开发预览。
+
+macOS Qt Release 编译通过；core-tests preset 1/1、desktop CTest 5/5（核心、网络/参考、Python 上传、Python 参考、UI）通过。参考测试使用可控源，验证了真实 TCP/UDP/HMAC/双声道拆包、仅所有者请求、关闭停止及断网保留占用；**不覆盖 Windows 实际 WASAPI 后端**。Android 四 ABI APK、iOS Simulator/iphoneos 无签名完整构建及手机 JVM 14 项互通/回退测试见相邻 MineMic/docs/AUDIO_ENHANCEMENT_VALIDATION.md。
+
+Windows MSVC/硬件初始化、音频格式转换/设备时间戳、游戏帧时间、iPhone 长时锁屏和连续异步漂移补偿尚未验收。保持 dev 状态，尚未创建 Windows 分发包或推送远端。

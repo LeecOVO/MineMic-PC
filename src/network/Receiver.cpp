@@ -11,6 +11,7 @@
 #include <QTimer>
 #include <QUdpSocket>
 #include <QVariant>
+#include <cstring>
 namespace minemic {
 namespace {
 QByteArray randomBytes(int count) {
@@ -30,7 +31,59 @@ bool hexId(const QString& value) {
     return true;
 }
 }
-Receiver::Receiver(AudioBuffer& buffer, QObject* parent) : QObject(parent), buffer_(buffer) { rotateCode(); }
+Receiver::Receiver(AudioBuffer& buffer, QObject* parent, std::unique_ptr<AudioReference> reference)
+    : QObject(parent), buffer_(buffer), reference_(reference ? std::move(reference) : createAudioReference()) { rotateCode(); }
+Receiver::~Receiver() { stopReference(); }
+void Receiver::setReferenceDevice(const QString& id) {
+    if (referenceDevice_ == id) return;
+    const bool restart = referenceWanted_;
+    stopReference(); referenceDevice_ = id;
+    if (restart) startReference();
+}
+void Receiver::stopReference() {
+    referenceWanted_ = false;
+    if (referenceTimer_) { delete referenceTimer_; referenceTimer_ = nullptr; }
+    reference_->stop();
+}
+void Receiver::startReference() {
+    stopReference();
+    QString error;
+    if (!reference_->supported() || !reference_->start(referenceDevice_, error)) {
+        reply(ownerSocket_, {{"type", "reference"}, {"state", "unavailable"}}); return;
+    }
+    referenceWanted_ = true; referenceSequence_ = 0;
+    referenceEpoch_ = QRandomGenerator::system()->generate();
+    referenceTimer_ = new QTimer(this); referenceTimer_->setTimerType(Qt::PreciseTimer); referenceTimer_->setInterval(10);
+    connect(referenceTimer_, &QTimer::timeout, this, &Receiver::sendReferences); referenceTimer_->start();
+    reply(ownerSocket_, {{"type", "reference"}, {"state", "starting"}});
+}
+void Receiver::sendReferences() {
+    const auto error = reference_->takeError();
+    if (!error.isEmpty()) {
+        stopReference(); reply(ownerSocket_, {{"type", "reference"}, {"state", "unavailable"}}); return;
+    }
+    ReferenceFrame frame;
+    for (int count = 0; count < 16 && reference_->take(frame); ++count) {
+        const auto now = referenceClockMicros();
+        if (!referenceWanted_ || !ownerSocket_ || !socket_ || !peerPort_ || !online_ ||
+            frame.timeMicros > now || now - frame.timeMicros > 50000) continue;
+        const auto sequence = referenceSequence_++;
+        for (int channel = 0; channel < 2; ++channel) {
+            QByteArray body(1008, '\0'); std::memcpy(body.data(), "MREF", 4);
+            body[4] = 1; body[5] = 2; body[6] = static_cast<char>(channel);
+            auto put = [&](int offset, quint64 value, int size = 4) {
+                for (int i = 0; i < size; ++i) body[offset + i] = static_cast<char>(value >> ((size - 1 - i) * 8));
+            };
+            put(8, session_); put(12, sequence); put(16, frame.position, 8); put(24, frame.timeMicros, 8);
+            put(32, 48000); put(36, 480, 2); put(38, 960, 2); put(40, referenceEpoch_ + frame.epoch);
+            for (int i = 0; i < 480; ++i) {
+                const auto sample = static_cast<quint16>(frame.pcm[2*i + channel]);
+                body[48 + 2*i] = static_cast<char>(sample); body[49 + 2*i] = static_cast<char>(sample >> 8);
+            }
+            socket_->writeDatagram(body + QMessageAuthenticationCode::hash(body, key_, QCryptographicHash::Sha256), peer_, peerPort_);
+        }
+    }
+}
 void Receiver::rotateCode() {
     QString next;
     do { next = QStringLiteral("%1").arg(QRandomGenerator::system()->bounded(1000000U), 6, 10, QLatin1Char('0')); } while (next == code_);
@@ -75,6 +128,7 @@ void Receiver::stopListening() {
 }
 void Receiver::manualDisconnect() { releaseOwner(QStringLiteral("pc")); }
 void Receiver::releaseOwner(const QString& reason) {
+    stopReference();
     if (ownerSocket_) {
         reply(ownerSocket_, {{"type", "disconnected"}, {"reason", reason}});
         ownerSocket_->disconnectFromHost();
@@ -93,7 +147,7 @@ void Receiver::acceptControls() {
         client->setSocketOption(QAbstractSocket::LowDelayOption, 1); controls_.insert(client, {});
         connect(client, &QTcpSocket::readyRead, this, [this, client] { readControl(client); });
         connect(client, &QTcpSocket::disconnected, this, [this, client] {
-            if (ownerSocket_ == client) { ownerSocket_.clear(); online_ = false; emit connectionChanged(true, false); }
+            if (ownerSocket_ == client) { stopReference(); ownerSocket_.clear(); online_ = false; emit connectionChanged(true, false); }
             controls_.remove(client); client->deleteLater();
         });
         QTimer::singleShot(5000, client, [this, client] { if (ownerSocket_ != client) client->disconnectFromHost(); });
@@ -122,6 +176,7 @@ void Receiver::readControl(QTcpSocket* client) {
     }
 }
 void Receiver::welcome(QTcpSocket* client, const QString& nonce, bool resume) {
+    stopReference();
     if (ownerSocket_ && ownerSocket_ != client) ownerSocket_->disconnectFromHost();
     ownerSocket_ = client; peer_ = client->peerAddress(); peerPort_ = 0;
     if (resume || !session_) {
@@ -131,13 +186,31 @@ void Receiver::welcome(QTcpSocket* client, const QString& nonce, bool resume) {
     lastAudio_.start(); online_ = true; timer_->setInterval(250);
     reply(client, {{"type", "welcome"}, {"nonce", nonce}, {"session", QString::number(session_)},
                    {"key", QString::fromLatin1(key_.toHex())}, {"token", token_},
-                   {"pcName", QHostInfo::localHostName()}, {"port", QString::number(server_->serverPort())}});
+                   {"pcName", QHostInfo::localHostName()}, {"port", QString::number(server_->serverPort())},
+                   {"caps", reference_->supported() ? "ref-pcm-stereo-v1" : ""}});
     emit peerChanged(QStringLiteral("%1 (%2)").arg(peerName_, peer_.toString())); emit connectionChanged(true, true);
 }
 void Receiver::handleControl(QTcpSocket* client, const QJsonObject& m) {
     auto reject = [&](const QString& reason) { reply(client, {{"type", "error"}, {"reason", reason}}); };
     if (m.value("app") != "MineMic" || m.value("v") != "2") { reject("version"); client->disconnectFromHost(); return; }
     const auto type = m.value("type").toString();
+    if (type == "clock" && ownerSocket_ == client && reference_->supported()) {
+        const auto received = referenceClockMicros();
+        bool valid = false; const auto t1 = m.value("t1").toString(); t1.toULongLong(&valid);
+        if (!valid || t1.size() > 20) { reject("invalid_request"); return; }
+        reply(client, {{"type", "clock"}, {"t1", t1}, {"t2", QString::number(received)}, {"t3", QString::number(referenceClockMicros())}});
+        return;
+    }
+    if (type == "reference" && ownerSocket_ == client && reference_->supported()) {
+        const auto enabled = m.value("enabled").toString();
+        if (enabled == "0") { stopReference(); reply(client, {{"type", "reference"}, {"state", "off"}}); }
+        else if (enabled == "1") {
+            if (!referenceWanted_) startReference();
+            else reply(client, {{"type", "reference"}, {"state", "starting"}});
+        }
+        else reject("invalid_request");
+        return;
+    }
     if (type == "ping" && ownerSocket_ == client) {
         lastAudio_.restart();
         if (!online_) { online_ = true; emit connectionChanged(true, true); }

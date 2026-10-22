@@ -39,7 +39,7 @@ private:
     QString peerLabel_;
     bool locked_ = false;
     bool running_ = false, busy_ = false;
-    QComboBox *devices_ = nullptr, *addresses_ = nullptr;
+    QComboBox *devices_ = nullptr, *addresses_ = nullptr, *referenceDevices_ = nullptr;
     QSpinBox* port_ = nullptr;
     QLineEdit* connection_ = nullptr;
     QPushButton *start_ = nullptr, *refresh_ = nullptr, *disconnect_ = nullptr;

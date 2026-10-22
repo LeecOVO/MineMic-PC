@@ -1,5 +1,6 @@
 #pragma once
 #include "core/AudioBuffer.h"
+#include "audio/AudioReference.h"
 #include <QByteArray>
 #include <QElapsedTimer>
 #include <QHostAddress>
@@ -16,13 +17,15 @@ class LanAdvertiser;
 class Receiver : public QObject {
     Q_OBJECT
 public:
-    explicit Receiver(AudioBuffer& buffer, QObject* parent = nullptr);
+    explicit Receiver(AudioBuffer& buffer, QObject* parent = nullptr, std::unique_ptr<AudioReference> reference = {});
+    ~Receiver() override;
     QString pairingCode() const { return code_; }
     static QByteArray authenticate(const Packet& packet, const QByteArray& key);
 public slots:
     void startListening(quint16 port);
     void stopListening();
     void manualDisconnect();
+    void setReferenceDevice(const QString& id);
 signals:
     void listening(quint16 port);
     void stopped();
@@ -42,6 +45,9 @@ private:
     void tick();
     void releaseOwner(const QString& reason);
     void rotateCode();
+    void stopReference();
+    void startReference();
+    void sendReferences();
     AudioBuffer& buffer_;
     QUdpSocket* socket_ = nullptr;
     QTcpServer* server_ = nullptr;
@@ -60,5 +66,10 @@ private:
     QElapsedTimer lastAudio_, attemptsWindow_;
     int attempts_ = 0;
     bool drainScheduled_ = false;
+    std::unique_ptr<AudioReference> reference_;
+    QTimer* referenceTimer_ = nullptr;
+    QString referenceDevice_;
+    bool referenceWanted_ = false;
+    quint32 referenceSequence_ = 0, referenceEpoch_ = 0;
 };
 }

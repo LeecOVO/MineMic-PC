@@ -41,7 +41,7 @@ QIcon applicationIcon() {
 }
 
 MainWindow::MainWindow() : output_(createAudioOutput()) {
-    setWindowTitle(QStringLiteral("MineMic %1 · Early Access").arg(QApplication::applicationVersion()));
+    setWindowTitle(QStringLiteral("MineMic %1 · 开发预览").arg(QApplication::applicationVersion()));
     setWindowIcon(applicationIcon());
     setMinimumSize(680, 640);
     auto* root = new QWidget(this);
@@ -49,7 +49,7 @@ MainWindow::MainWindow() : output_(createAudioOutput()) {
     auto* title = new QLabel(QStringLiteral("MineMic"));
     QFont titleFont = title->font(); titleFont.setPointSize(24); titleFont.setBold(true); title->setFont(titleFont);
     layout->addWidget(title);
-    auto* subtitle = new QLabel(tr("%1 · Early Access · 首个可用版本\n把手机变成电脑麦克风 · 局域网连接").arg(QApplication::applicationVersion()));
+    auto* subtitle = new QLabel(tr("%1 · 开发预览 · 音频增强\n把手机变成电脑麦克风 · 局域网连接").arg(QApplication::applicationVersion()));
     layout->addWidget(subtitle);
 
     auto* routing = new QGroupBox(tr("音频输出"));
@@ -58,6 +58,7 @@ MainWindow::MainWindow() : output_(createAudioOutput()) {
     devices_ = new QComboBox; devices_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     devices_->setMinimumContentsLength(30); row->addWidget(devices_, 1);
     refresh_ = new QPushButton(tr("刷新")); row->addWidget(refresh_);
+    auto* referenceButton = new QPushButton(tr("外放参考…")); row->addWidget(referenceButton);
     routingLayout->addLayout(row);
     auto* routingHint = new QLabel(tr("选择虚拟声卡的播放端；在会议或游戏中选择它对应的录音端。\n选择实体扬声器时将直接播放手机声音。"));
     routingHint->setWordWrap(true); routingHint->setMinimumHeight(44);
@@ -76,6 +77,22 @@ MainWindow::MainWindow() : output_(createAudioOutput()) {
     meter_ = new QProgressBar; meter_->setRange(0, 32768); meter_->setValue(0);
     meter_->setTextVisible(false); meter_->setMaximumHeight(10); routingLayout->addWidget(meter_);
     layout->addWidget(routing);
+    auto* reference = new QDialog(this);
+    reference->setWindowTitle(tr("回声抑制 · 外放参考")); reference->resize(520, 180);
+    auto* referenceLayout = new QVBoxLayout(reference);
+    referenceDevices_ = new QComboBox; referenceLayout->addWidget(referenceDevices_);
+    auto* referenceHint = new QLabel(tr("选择实际外放的扬声器或音响。仅在手机启用回声抑制时采集并发送参考，算法在手机处理。"));
+    referenceHint->setWordWrap(true); referenceLayout->addWidget(referenceHint);
+#ifndef Q_OS_WIN
+    referenceHint->setText(tr("回声抑制参考目前需要 Windows WASAPI；此平台继续支持原始音频与手机降噪。"));
+    referenceDevices_->setEnabled(false);
+#endif
+    auto* referenceClose = new QDialogButtonBox(QDialogButtonBox::Close, reference);
+    referenceLayout->addWidget(referenceClose);
+    connect(referenceClose, &QDialogButtonBox::rejected, reference, &QDialog::hide);
+    connect(referenceButton, &QPushButton::clicked, this, [reference] {
+        reference->show(); reference->raise(); reference->activateWindow();
+    });
 
     auto* pairing = new QGroupBox(tr("手机连接"));
     auto* form = new QFormLayout(pairing);
@@ -96,13 +113,16 @@ MainWindow::MainWindow() : output_(createAudioOutput()) {
     connection_ = new QLineEdit; connection_->setReadOnly(true); connection_->setAccessibleName(tr("6 位配对码"));
     QFont codeFont = connection_->font(); codeFont.setPointSize(26); codeFont.setBold(true);
     connection_->setFont(codeFont); connection_->setAlignment(Qt::AlignCenter);
-    connection_->setMinimumHeight(56);
-    form->addRow(tr("配对码"), connection_);
+    connection_->setFixedHeight(56);
     auto* pairingButtons = new QHBoxLayout;
     auto* copy = new QPushButton(tr("复制配对码"));
     disconnect_ = new QPushButton(tr("断开当前手机")); disconnect_->setEnabled(false);
     pairingButtons->addWidget(copy); pairingButtons->addWidget(disconnect_); pairingButtons->addStretch();
-    form->addRow(QString(), pairingButtons);
+    auto* pairingField = new QWidget; pairingField->setMinimumHeight(92);
+    auto* pairingFieldLayout = new QVBoxLayout(pairingField);
+    pairingFieldLayout->setContentsMargins(0, 0, 0, 0); pairingFieldLayout->setSpacing(8);
+    pairingFieldLayout->addWidget(connection_); pairingFieldLayout->addLayout(pairingButtons);
+    form->addRow(tr("配对码"), pairingField);
     auto* networkHint = new QLabel(tr("手机输入 6 位配对码即可连接，也可手动输入上方 PC 地址。\n首台手机连接后保持独占；手动断开后自动更新配对码。"));
     networkHint->setWordWrap(true); networkHint->setMinimumHeight(48); form->addRow(networkHint);
     layout->addWidget(pairing);
@@ -152,6 +172,10 @@ MainWindow::MainWindow() : output_(createAudioOutput()) {
     networkThread_.setObjectName(QStringLiteral("MineMic UDP")); networkThread_.start();
     connect(start_, &QPushButton::clicked, this, [this] { if (running_) stop(); else start(); });
     connect(refresh_, &QPushButton::clicked, this, &MainWindow::refreshDevices);
+    connect(referenceDevices_, &QComboBox::currentIndexChanged, this, [this] {
+        const auto id = referenceDevices_->currentData().toString();
+        QMetaObject::invokeMethod(receiver_, [this, id] { receiver_->setReferenceDevice(id); }, Qt::QueuedConnection);
+    });
     connect(port_, &QSpinBox::valueChanged, this, &MainWindow::updateConnectionInfo);
     connect(addresses_, &QComboBox::currentTextChanged, this, &MainWindow::updateConnectionInfo);
     connect(copy, &QPushButton::clicked, this, [this] { QApplication::clipboard()->setText(connection_->text()); });
@@ -188,6 +212,7 @@ MainWindow::~MainWindow() {
     settings.setValue(QStringLiteral("port"), port_->value());
     settings.setValue(QStringLiteral("device"), devices_->currentData());
     settings.setValue(QStringLiteral("gain"), gain_->value());
+    settings.setValue(QStringLiteral("referenceDevice"), referenceDevices_->currentData());
 
 }
 
@@ -202,7 +227,7 @@ void MainWindow::showAbout() {
     info->setOpenExternalLinks(true);
     info->setHtml(tr(
         "<h2>MineMic-PC</h2>"
-        "<p><b>版本：%1</b><br>Early Access · 首个可用版本<br>音频协议：v2</p>"
+        "<p><b>版本：%1</b><br>开发预览 · 音频增强<br>音频协议：v2</p>"
         "<p>将手机作为电脑麦克风的局域网音频接收端。<br>C++17 + Qt Widgets，无需云服务器。</p>"
         "<p>作者：LeeC<br>原创代码许可：MIT License<br>© 2026 LeeC</p>"
         "<p><a href=\"https://github.com/LeecOVO/MineMic-PC\">PC 项目 / 问题反馈</a> · "
@@ -220,9 +245,16 @@ void MainWindow::showAbout() {
 void MainWindow::refreshDevices() {
     const auto previous = devices_->currentData().toString();
     const auto preferred = previous.isEmpty() ? QSettings().value(QStringLiteral("device")).toString() : previous;
+    const auto referencePreferred = referenceDevices_->currentData().toString().isEmpty()
+        ? QSettings().value(QStringLiteral("referenceDevice")).toString() : referenceDevices_->currentData().toString();
+    referenceDevices_->clear(); referenceDevices_->addItem(tr("请选择实际外放设备（可选）"), QString());
     devices_->clear(); devices_->addItem(tr("请选择输出设备"), QString());
     QString error;
-    for (const auto& device : output_->devices(error)) devices_->addItem(device.name, device.id);
+    for (const auto& device : output_->devices(error)) {
+        devices_->addItem(device.name, device.id); referenceDevices_->addItem(device.name, device.id);
+    }
+    const int referenceIndex = referenceDevices_->findData(referencePreferred);
+    if (referenceIndex > 0) referenceDevices_->setCurrentIndex(referenceIndex);
     const int index = devices_->findData(preferred);
     if (index > 0) devices_->setCurrentIndex(index);
     if (!error.isEmpty()) status_->setText(error);
@@ -237,6 +269,9 @@ void MainWindow::setRunning(bool running) {
     running_ = running; start_->setEnabled(!busy_);
     start_->setText(running ? tr("停止接收") : tr("开始接收"));
     devices_->setEnabled(!running && !busy_); refresh_->setEnabled(!running && !busy_);
+    #ifdef Q_OS_WIN
+    referenceDevices_->setEnabled(!busy_);
+#endif
     port_->setEnabled(false); disconnect_->setEnabled(running && locked_);
     if (tray_) tray_->setToolTip(running ? tr("MineMic · 接收中") : QStringLiteral("MineMic"));
 }
@@ -250,7 +285,10 @@ void MainWindow::start() {
     if (!output_->start(id, buffer_, error)) { showError(error); return; }
     busy_ = true; setRunning(false); status_->setText(tr("正在启动接收…"));
     const auto port = static_cast<quint16>(port_->value());
-    QMetaObject::invokeMethod(receiver_, [this, port] { receiver_->startListening(port); }, Qt::QueuedConnection);
+    const auto referenceId = referenceDevices_->currentData().toString();
+    QMetaObject::invokeMethod(receiver_, [this, port, referenceId] {
+        receiver_->setReferenceDevice(referenceId); receiver_->startListening(port);
+    }, Qt::QueuedConnection);
 }
 
 void MainWindow::stop() {

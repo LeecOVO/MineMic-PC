@@ -12,3 +12,7 @@
 手机端版本唯一来源是根目录 `version.xcconfig`，供 Xcode 直接包含，Gradle 同时读取以生成 Android 版本和共享界面的版本常量。iOS 的系统展示字段只支持三段数字，所以 `CFBundleShortVersionString` 为 `0.0.1`；完整 `0.0.1-ea.1` 保存在 `MineMicVersion` 并显示在应用中。参见 [Apple 字段要求](https://developer.apple.com/documentation/bundleresources/information-property-list/cfbundleshortversionstring)。
 
 PC 的版本唯一来源是它自己仓库的 `CMakeLists.txt`，生成应用版本头文件和 Windows 版本资源。两个仓库独立管理；在同一轮联调分发中应核对基础版本和协议兼容性。
+
+## 下一版开发快照
+
+本轮新增可选音频增强，使用 **0.1.0-dev.1**，构建号 **5**。0.x 阶段以次版本标记这一轮功能开发，`dev.1` 表明尚在开发和调优；不代表晋级稳定版或 EA 验收。已发布首个可用版本仍为 **0.0.1-ea.1**。原有 v2 上传/配对协议不变，参考采用可选能力协商。

@@ -13,6 +13,8 @@
 #include <iostream>
 #include <cstdlib>
 #include <algorithm>
+#include <QMessageAuthenticationCode>
+#include <QCryptographicHash>
 using namespace minemic;
 namespace {
 void check(bool pass, const char* message) { if (!pass) { std::cerr << "FAIL: " << message << '\n'; std::exit(1); } }
@@ -35,26 +37,82 @@ QJsonObject connectRequest(QString id, QString nonce, QString code = {}) {
     return {{"type", "connect"}, {"mode", code.isEmpty() ? "manual" : "code"}, {"code", code},
             {"clientId", id}, {"nonce", nonce}, {"name", "Test phone"}};
 }
+class TestReference final : public AudioReference {
+public:
+    bool active = false;
+    bool supported() const override { return true; }
+    bool start(const QString&, QString&) override { active = true; return true; }
+    void stop() override { active = false; }
+    bool take(ReferenceFrame& out) override {
+        const auto now = referenceClockMicros();
+        if (!active || now - last_ < 10000) return false;
+        last_ = now; out.position = position_; position_ += 480; out.timeMicros = now - 10000; out.epoch = 1;
+        for (int i = 0; i < 480; ++i) { out.pcm[2*i] = 1000; out.pcm[2*i+1] = -2000; }
+        return true;
+    }
+    QString takeError() override { return {}; }
+private:
+    std::uint64_t position_ = 0, last_ = 0;
+};
+void referenceTests() {
+    AudioBuffer buffer;
+    auto source = std::make_unique<TestReference>(); auto* native = source.get();
+    Receiver receiver(buffer, nullptr, std::move(source)); quint16 port = 0;
+    QObject::connect(&receiver, &Receiver::listening, [&](quint16 value) { port = value; });
+    receiver.startListening(0);
+    QTcpSocket owner, stranger; connectTo(owner, port); connectTo(stranger, port);
+    const auto welcome = rpc(owner, connectRequest(QString(32, 'a'), QString(32, 'b')));
+    check(welcome["caps"] == "ref-pcm-stereo-v1" && !native->active, "reference capability advertised without starting capture");
+    check(rpc(stranger, {{"type", "reference"}, {"enabled", "1"}})["type"] == "error" && !native->active, "non-owner cannot capture PC audio");
+    const auto clock = rpc(owner, {{"type", "clock"}, {"t1", "1234"}});
+    check(clock["t1"] == "1234" && clock["t3"].toString().toULongLong() >= clock["t2"].toString().toULongLong(), "four-timestamp clock exchange");
+    const auto key = QByteArray::fromHex(welcome["key"].toString().toLatin1());
+    const auto session = welcome["session"].toString().toUInt();
+    QUdpSocket audio;
+    Packet packet; packet.type = PacketType::Audio; packet.session = session; packet.payload.resize(MaxPayload);
+    audio.writeDatagram(Receiver::authenticate(packet, key), QHostAddress::LocalHost, port);
+    check(until([&] { return buffer.stats().accepted == 1; }), "reference destination bound by authenticated microphone");
+    check(rpc(owner, {{"type", "reference"}, {"enabled", "1"}})["state"] == "starting" && native->active, "only owner starts loopback on request");
+    for (int channel = 0; channel < 2; ++channel) {
+        check(until([&] { return audio.hasPendingDatagrams(); }), "stereo reference received");
+        QByteArray bytes(static_cast<qsizetype>(audio.pendingDatagramSize()), '\0'); audio.readDatagram(bytes.data(), bytes.size());
+        check(bytes.size() == 1040 && bytes.first(4) == "MREF" && bytes[6] == channel, "MTU-safe reference channel format");
+        check(bytes.last(32) == QMessageAuthenticationCode::hash(bytes.first(1008), key, QCryptographicHash::Sha256), "reference authenticated with current session key");
+        const auto value = static_cast<std::int16_t>(static_cast<unsigned char>(bytes[48]) | (static_cast<unsigned char>(bytes[49]) << 8));
+        check(value == (channel ? -2000 : 1000), "left and right remain independent");
+    }
+    check(rpc(owner, {{"type", "reference"}, {"enabled", "0"}})["state"] == "off" && !native->active, "turning AEC off stops capture");
+    rpc(owner, {{"type", "reference"}, {"enabled", "1"}}); owner.abort();
+    check(until([&] { return !native->active; }), "network loss stops reference without releasing ownership");
+    check(rpc(stranger, connectRequest(QString(32, 'c'), QString(32, 'd')))["reason"] == "busy", "reference disconnect preserves first owner");
+    receiver.stopListening();
+}
 }
 int main(int argc, char** argv) {
-    QCoreApplication app(argc, argv); AudioBuffer buffer; Receiver receiver(buffer);
+    QCoreApplication app(argc, argv); AudioBuffer buffer;
+    const bool referenceFixture = argc > 1 && (QString::fromLocal8Bit(argv[1]) == "--serve-reference" || QString::fromLocal8Bit(argv[1]) == "--python-reference-sender");
+    Receiver receiver(buffer, nullptr, referenceFixture ? std::make_unique<TestReference>() : nullptr);
     quint16 port = 0; bool locked = false;
     QObject::connect(&receiver, &Receiver::listening, [&](quint16 p) { port = p; });
     QObject::connect(&receiver, &Receiver::connectionChanged, [&](bool owner, bool) { locked = owner; });
     receiver.startListening(0); check(port != 0, "TCP and UDP bound on same port");
     const QString code = receiver.pairingCode();
-    if (argc == 2 && QString::fromLocal8Bit(argv[1]) == "--serve") {
+    if (argc == 2 && (QString::fromLocal8Bit(argv[1]) == "--serve" || referenceFixture)) {
         std::cout << port << ' ' << code.toStdString() << std::endl;
         QTimer::singleShot(60000, &app, &QCoreApplication::quit);
         return app.exec();
     }
     check(code.size() == 6 && std::all_of(code.begin(), code.end(), [](QChar c) { return c >= '0' && c <= '9'; }), "exactly six decimal digits");
-    if (argc == 4 && QString::fromLocal8Bit(argv[1]) == "--python-sender") {
+    if (argc == 4 && (QString::fromLocal8Bit(argv[1]) == "--python-sender" || QString::fromLocal8Bit(argv[1]) == "--python-reference-sender")) {
         QProcess sender;
-        sender.start(QString::fromLocal8Bit(argv[2]), {QString::fromLocal8Bit(argv[3]), "127.0.0.1", "--port", QString::number(port), "--code", code, "--seconds", "0.3"});
+        QStringList arguments{QString::fromLocal8Bit(argv[3]), "127.0.0.1", "--port", QString::number(port), "--code", code, "--seconds", "0.3"};
+        if (referenceFixture) arguments << "--reference";
+        sender.start(QString::fromLocal8Bit(argv[2]), arguments);
         check(sender.waitForStarted(2000), "Python starts"); std::uint64_t maximum = 0;
         check(until([&] { maximum = std::max(maximum, buffer.stats().accepted); return sender.state() == QProcess::NotRunning; }, 8000), "Python finishes");
         if (sender.exitCode()) std::cerr << sender.readAllStandardError().constData();
+        const auto stdoutBytes = sender.readAllStandardOutput();
+        if (referenceFixture) check(stdoutBytes.contains("Authenticated reference packets:") && !stdoutBytes.contains("Authenticated reference packets: 0"), "Python validates reference packets");
         check(sender.exitCode() == 0 && maximum >= 10, "Python pairs by six-digit code and streams v2 audio");
         check(!locked && receiver.pairingCode() != code, "Python explicit disconnect rotates code");
         receiver.stopListening(); std::cout << "Python interop passed\n"; return 0;
@@ -102,5 +160,6 @@ int main(int argc, char** argv) {
     check(LanAdvertiser::relevantQuery(query, "x", "y"), "Bonjour browse query recognized");
     QByteArray malicious(12, '\0'); malicious[5] = 1; malicious += QByteArray::fromHex("c00c000c0001");
     check(!LanAdvertiser::relevantQuery(malicious, "x", "y"), "DNS compression loop bounded");
-    receiver.stopListening(); std::cout << "Pairing, first-owner lock, resume, rotation, audio and DNS tests passed\n";
+    receiver.stopListening(); referenceTests();
+    std::cout << "Pairing, first-owner lock, resume, rotation, audio, reference and DNS tests passed\n";
 }
