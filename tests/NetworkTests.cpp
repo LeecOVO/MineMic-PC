@@ -40,6 +40,7 @@ QJsonObject connectRequest(QString id, QString nonce, QString code = {}) {
 class TestReference final : public AudioReference {
 public:
     bool active = false;
+    QString error;
     bool supported() const override { return true; }
     bool start(const QString&, QString&) override { active = true; return true; }
     void stop() override { active = false; }
@@ -50,7 +51,7 @@ public:
         for (int i = 0; i < 480; ++i) { out.pcm[2*i] = 1000; out.pcm[2*i+1] = -2000; }
         return true;
     }
-    QString takeError() override { return {}; }
+    QString takeError() override { const auto result = error; error.clear(); return result; }
 private:
     std::uint64_t position_ = 0, last_ = 0;
 };
@@ -81,6 +82,12 @@ void referenceTests() {
         const auto value = static_cast<std::int16_t>(static_cast<unsigned char>(bytes[48]) | (static_cast<unsigned char>(bytes[49]) << 8));
         check(value == (channel ? -2000 : 1000), "left and right remain independent");
     }
+    native->error = QStringLiteral("Reference loopback format (0x88890008)");
+    check(until([&] { return owner.canReadLine(); }), "capture failure reported asynchronously");
+    const auto failed = QJsonDocument::fromJson(owner.readLine()).object();
+    check(failed["state"] == "unavailable" && failed["detail"].toString().contains("0x88890008") && !native->active,
+          "actual capture failure detail reaches phone without releasing ownership");
+    check(rpc(owner, {{"type", "reference"}, {"enabled", "1"}})["state"] == "starting", "capture can recover after explicit failure");
     check(rpc(owner, {{"type", "reference"}, {"enabled", "0"}})["state"] == "off" && !native->active, "turning AEC off stops capture");
     rpc(owner, {{"type", "reference"}, {"enabled", "1"}}); owner.abort();
     check(until([&] { return !native->active; }), "network loss stops reference without releasing ownership");
@@ -114,7 +121,7 @@ int main(int argc, char** argv) {
         const auto stdoutBytes = sender.readAllStandardOutput();
         if (referenceFixture) check(stdoutBytes.contains("Authenticated reference packets:") && !stdoutBytes.contains("Authenticated reference packets: 0"), "Python validates reference packets");
         check(sender.exitCode() == 0 && maximum >= 10, "Python pairs by six-digit code and streams v2 audio");
-        check(!locked && receiver.pairingCode() != code, "Python explicit disconnect rotates code");
+        check(!locked && receiver.pairingCode() == code, "Python explicit disconnect preserves code");
         receiver.stopListening(); std::cout << "Python interop passed\n"; return 0;
     }
     const QString idA(32, 'a'), nonceA(32, 'b'), idB(32, 'c'), nonceB(32, 'd');
@@ -124,6 +131,8 @@ int main(int argc, char** argv) {
     check(!locked, "wrong code does not claim PC");
     auto welcome = rpc(first, connectRequest(idA, nonceA, code));
     check(welcome["type"] == "welcome" && locked, "first matching phone claims PC");
+    receiver.startListening(port);
+    check(locked && receiver.pairingCode() == code, "repeated start preserves owner and pairing code");
     check(rpc(first, connectRequest(idA, nonceA, code))["session"] == welcome["session"], "retry is idempotent");
     check(rpc(other, connectRequest(idB, nonceB, code))["reason"] == "busy", "second code connection rejected");
     check(rpc(other, connectRequest(idB, nonceB))["reason"] == "busy", "second manual IP connection rejected");
@@ -149,12 +158,31 @@ int main(int argc, char** argv) {
     until([] { return false; }, 50);
     check(locked && buffer.stats().accepted == 4, "UDP BYE and invalid audio cannot release owner");
     auto released = rpc(resumed, {{"type", "disconnect"}, {"clientId", idA}, {"token", token}});
-    check(released["type"] == "disconnected" && !locked && receiver.pairingCode() != code, "phone manual disconnect releases and rotates code");
-    check(rpc(other, connectRequest(idB, nonceB, code))["reason"] == "wrong_code", "old pairing code expires");
+    check(released["type"] == "disconnected" && !locked && receiver.pairingCode() == code, "phone disconnect releases ownership and preserves code");
+    check(rpc(other, connectRequest(idB, nonceB, code))["type"] == "welcome", "same code can pair after release");
+    receiver.refreshPairingCode();
     const auto nextCode = receiver.pairingCode();
-    check(rpc(other, connectRequest(idB, nonceB))["type"] == "welcome", "manual IP pairs with no code when available");
+    check(nextCode != code && locked, "manual refresh changes code without releasing owner");
+    check(rpc(other, {{"type", "ping"}})["type"] == "pong", "manual refresh preserves active session");
+    QTcpSocket stranger; connectTo(stranger, port);
+    check(rpc(stranger, connectRequest(idA, nonceA, code))["reason"] == "wrong_code", "manual refresh invalidates previous code");
+    check(rpc(stranger, connectRequest(idA, nonceA, nextCode))["reason"] == "busy", "manual refresh preserves exclusive ownership");
     receiver.manualDisconnect();
-    check(!locked && receiver.pairingCode() != nextCode, "PC manual disconnect rotates code too");
+    check(!locked && receiver.pairingCode() == nextCode, "PC disconnect preserves code too");
+    QTcpSocket manual; connectTo(manual, port);
+    check(rpc(manual, connectRequest(idA, nonceA))["type"] == "welcome", "manual IP pairs without code after release");
+    receiver.manualDisconnect();
+    receiver.stopListening();
+    const auto stoppedCode = receiver.pairingCode();
+    check(stoppedCode != nextCode, "stopping reception rotates code");
+    receiver.stopListening();
+    check(receiver.pairingCode() == stoppedCode, "repeated stop does not rotate an already stopped receiver");
+    receiver.startListening(0);
+    check(receiver.pairingCode() == stoppedCode, "starting reception preserves stopped code");
+    {
+        Receiver restored(buffer, nullptr, {}, QStringLiteral("000007"));
+        check(restored.pairingCode() == QStringLiteral("000007"), "persisted six-digit code including leading zeros is restored");
+    }
     QByteArray query(12, '\0'); query[5] = 1;
     query += QByteArray("\x08_minemic\x04_tcp\x05local\0\0\x0c\0\x01", 25);
     check(LanAdvertiser::relevantQuery(query, "x", "y"), "Bonjour browse query recognized");

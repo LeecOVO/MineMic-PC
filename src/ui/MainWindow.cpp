@@ -20,6 +20,7 @@
 #include <QPushButton>
 #include <QRandomGenerator>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
 #include <QSystemTrayIcon>
@@ -63,6 +64,9 @@ MainWindow::MainWindow() : output_(createAudioOutput()) {
     auto* routingHint = new QLabel(tr("选择虚拟声卡的播放端；在会议或游戏中选择它对应的录音端。\n选择实体扬声器时将直接播放手机声音。"));
     routingHint->setWordWrap(true); routingHint->setMinimumHeight(44);
     routingLayout->addWidget(routingHint);
+    referenceStatus_ = new QLabel(tr("外放参考：自动跟随系统默认外放设备，手机开启回声抑制后使用"));
+    referenceStatus_->setWordWrap(true); referenceStatus_->setTextFormat(Qt::PlainText);
+    routingLayout->addWidget(referenceStatus_);
     auto* gainRow = new QHBoxLayout;
     gainRow->addWidget(new QLabel(tr("音量")));
     gain_ = new QSlider(Qt::Horizontal); gain_->setRange(0, 200);
@@ -81,7 +85,7 @@ MainWindow::MainWindow() : output_(createAudioOutput()) {
     reference->setWindowTitle(tr("回声抑制 · 外放参考")); reference->resize(520, 180);
     auto* referenceLayout = new QVBoxLayout(reference);
     referenceDevices_ = new QComboBox; referenceLayout->addWidget(referenceDevices_);
-    auto* referenceHint = new QLabel(tr("选择实际外放的扬声器或音响。仅在手机启用回声抑制时采集并发送参考，算法在手机处理。"));
+    auto* referenceHint = new QLabel(tr("默认自动跟随 Windows 当前外放设备，无需每次设置。若游戏或会议单独指定了输出设备，可在此手动选择；选择会自动保存。仅在手机开启回声抑制时回传音频参考。"));
     referenceHint->setWordWrap(true); referenceLayout->addWidget(referenceHint);
 #ifndef Q_OS_WIN
     referenceHint->setText(tr("回声抑制参考目前需要 Windows WASAPI；此平台继续支持原始音频与手机降噪。"));
@@ -116,14 +120,16 @@ MainWindow::MainWindow() : output_(createAudioOutput()) {
     connection_->setFixedHeight(56);
     auto* pairingButtons = new QHBoxLayout;
     auto* copy = new QPushButton(tr("复制配对码"));
+    auto* regenerate = new QPushButton(tr("更新配对码"));
+    regenerate->setToolTip(tr("更换配对码，已连接的手机不受影响"));
     disconnect_ = new QPushButton(tr("断开当前手机")); disconnect_->setEnabled(false);
-    pairingButtons->addWidget(copy); pairingButtons->addWidget(disconnect_); pairingButtons->addStretch();
+    pairingButtons->addWidget(copy); pairingButtons->addWidget(regenerate); pairingButtons->addWidget(disconnect_); pairingButtons->addStretch();
     auto* pairingField = new QWidget; pairingField->setMinimumHeight(92);
     auto* pairingFieldLayout = new QVBoxLayout(pairingField);
     pairingFieldLayout->setContentsMargins(0, 0, 0, 0); pairingFieldLayout->setSpacing(8);
     pairingFieldLayout->addWidget(connection_); pairingFieldLayout->addLayout(pairingButtons);
     form->addRow(tr("配对码"), pairingField);
-    auto* networkHint = new QLabel(tr("手机输入 6 位配对码即可连接，也可手动输入上方 PC 地址。\n首台手机连接后保持独占；手动断开后自动更新配对码。"));
+    auto* networkHint = new QLabel(tr("手机输入 6 位配对码即可连接，也可手动输入上方 PC 地址。\n首台手机连接后保持独占；配对码仅在停止接收或手动更新时改变。"));
     networkHint->setWordWrap(true); networkHint->setMinimumHeight(48); form->addRow(networkHint);
     layout->addWidget(pairing);
     status_ = new QLabel(tr("未启动")); status_->setWordWrap(true); status_->setTextFormat(Qt::PlainText);
@@ -137,7 +143,7 @@ MainWindow::MainWindow() : output_(createAudioOutput()) {
     start_->setDefault(true); start_->setMinimumHeight(34); bottom->addWidget(start_);
     layout->addLayout(bottom); layout->addStretch(); setCentralWidget(root);
 
-    receiver_ = new Receiver(buffer_);
+    receiver_ = new Receiver(buffer_, nullptr, {}, settings.value(QStringLiteral("pairingCode")).toString());
     receiver_->moveToThread(&networkThread_);
     connect(&networkThread_, &QThread::finished, receiver_, &QObject::deleteLater);
     connect(receiver_, &Receiver::listening, this, [this](quint16) {
@@ -145,9 +151,12 @@ MainWindow::MainWindow() : output_(createAudioOutput()) {
         busy_ = false; setRunning(true); status_->setText(tr("正在等待手机连接"));
     });
     pairingCode_ = receiver_->pairingCode(); updateConnectionInfo();
+    QSettings().setValue(QStringLiteral("pairingCode"), pairingCode_);
     connect(receiver_, &Receiver::pairingCodeChanged, this, [this](const QString& code) {
         pairingCode_ = code; updateConnectionInfo();
+        QSettings().setValue(QStringLiteral("pairingCode"), code);
     });
+    connect(receiver_, &Receiver::referenceStatusChanged, referenceStatus_, &QLabel::setText);
     connect(receiver_, &Receiver::peerChanged, this, [this](const QString& peer) { peerLabel_ = peer; });
     connect(receiver_, &Receiver::connectionChanged, this, [this](bool locked, bool online) {
         locked_ = locked; disconnect_->setEnabled(locked && running_);
@@ -174,11 +183,15 @@ MainWindow::MainWindow() : output_(createAudioOutput()) {
     connect(refresh_, &QPushButton::clicked, this, &MainWindow::refreshDevices);
     connect(referenceDevices_, &QComboBox::currentIndexChanged, this, [this] {
         const auto id = referenceDevices_->currentData().toString();
+        QSettings().setValue(QStringLiteral("referenceDevice"), id);
         QMetaObject::invokeMethod(receiver_, [this, id] { receiver_->setReferenceDevice(id); }, Qt::QueuedConnection);
     });
     connect(port_, &QSpinBox::valueChanged, this, &MainWindow::updateConnectionInfo);
     connect(addresses_, &QComboBox::currentTextChanged, this, &MainWindow::updateConnectionInfo);
     connect(copy, &QPushButton::clicked, this, [this] { QApplication::clipboard()->setText(connection_->text()); });
+    connect(regenerate, &QPushButton::clicked, this, [this] {
+        QMetaObject::invokeMethod(receiver_, &Receiver::refreshPairingCode, Qt::QueuedConnection);
+    });
     connect(disconnect_, &QPushButton::clicked, this, [this] {
         QMetaObject::invokeMethod(receiver_, &Receiver::manualDisconnect, Qt::QueuedConnection);
     });
@@ -245,9 +258,10 @@ void MainWindow::showAbout() {
 void MainWindow::refreshDevices() {
     const auto previous = devices_->currentData().toString();
     const auto preferred = previous.isEmpty() ? QSettings().value(QStringLiteral("device")).toString() : previous;
-    const auto referencePreferred = referenceDevices_->currentData().toString().isEmpty()
+    const auto referencePreferred = referenceDevices_->currentIndex() < 0
         ? QSettings().value(QStringLiteral("referenceDevice")).toString() : referenceDevices_->currentData().toString();
-    referenceDevices_->clear(); referenceDevices_->addItem(tr("请选择实际外放设备（可选）"), QString());
+    const QSignalBlocker referenceSignals(referenceDevices_);
+    referenceDevices_->clear(); referenceDevices_->addItem(tr("自动 · 跟随系统默认外放设备（推荐）"), QString());
     devices_->clear(); devices_->addItem(tr("请选择输出设备"), QString());
     QString error;
     for (const auto& device : output_->devices(error)) {
@@ -255,6 +269,9 @@ void MainWindow::refreshDevices() {
     }
     const int referenceIndex = referenceDevices_->findData(referencePreferred);
     if (referenceIndex > 0) referenceDevices_->setCurrentIndex(referenceIndex);
+    const auto referenceId = referenceDevices_->currentData().toString();
+    QSettings().setValue(QStringLiteral("referenceDevice"), referenceId);
+    QMetaObject::invokeMethod(receiver_, [this, referenceId] { receiver_->setReferenceDevice(referenceId); }, Qt::QueuedConnection);
     const int index = devices_->findData(preferred);
     if (index > 0) devices_->setCurrentIndex(index);
     if (!error.isEmpty()) status_->setText(error);
@@ -292,7 +309,15 @@ void MainWindow::start() {
 }
 
 void MainWindow::stop() {
-    if (networkThread_.isRunning()) QMetaObject::invokeMethod(receiver_, &Receiver::stopListening, Qt::BlockingQueuedConnection);
+    QString stoppedCode;
+    if (networkThread_.isRunning()) QMetaObject::invokeMethod(receiver_, [this, &stoppedCode] {
+        receiver_->stopListening(); stoppedCode = receiver_->pairingCode();
+    }, Qt::BlockingQueuedConnection);
+    // During destruction the UI event loop may no longer deliver code-change signals.
+    if (!stoppedCode.isEmpty()) {
+        pairingCode_ = stoppedCode; updateConnectionInfo();
+        QSettings().setValue(QStringLiteral("pairingCode"), stoppedCode);
+    }
     output_->stop(); buffer_.reset(); busy_ = false; setRunning(false);
     meter_->setValue(0); status_->setText(tr("已停止"));
 }

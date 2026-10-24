@@ -17,7 +17,7 @@ class LanAdvertiser;
 class Receiver : public QObject {
     Q_OBJECT
 public:
-    explicit Receiver(AudioBuffer& buffer, QObject* parent = nullptr, std::unique_ptr<AudioReference> reference = {});
+    explicit Receiver(AudioBuffer& buffer, QObject* parent = nullptr, std::unique_ptr<AudioReference> reference = {}, const QString& initialCode = {});
     ~Receiver() override;
     QString pairingCode() const { return code_; }
     static QByteArray authenticate(const Packet& packet, const QByteArray& key);
@@ -25,11 +25,13 @@ public slots:
     void startListening(quint16 port);
     void stopListening();
     void manualDisconnect();
+    void refreshPairingCode();
     void setReferenceDevice(const QString& id);
 signals:
     void listening(quint16 port);
     void stopped();
     void pairingCodeChanged(const QString& code);
+    void referenceStatusChanged(const QString& status);
     void peerChanged(const QString& address);
     void connectionChanged(bool locked, bool online);
     void discoveryWarning(const QString& message);
@@ -69,7 +71,9 @@ private:
     std::unique_ptr<AudioReference> reference_;
     QTimer* referenceTimer_ = nullptr;
     QString referenceDevice_;
-    bool referenceWanted_ = false;
+    bool referenceWanted_ = false, referenceFlowing_ = false;
+    bool listening_ = false;
+    quint64 lastReferenceSent_ = 0;
     quint32 referenceSequence_ = 0, referenceEpoch_ = 0;
 };
 }

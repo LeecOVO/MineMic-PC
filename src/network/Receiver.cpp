@@ -31,8 +31,12 @@ bool hexId(const QString& value) {
     return true;
 }
 }
-Receiver::Receiver(AudioBuffer& buffer, QObject* parent, std::unique_ptr<AudioReference> reference)
-    : QObject(parent), buffer_(buffer), reference_(reference ? std::move(reference) : createAudioReference()) { rotateCode(); }
+Receiver::Receiver(AudioBuffer& buffer, QObject* parent, std::unique_ptr<AudioReference> reference, const QString& initialCode)
+    : QObject(parent), buffer_(buffer), reference_(reference ? std::move(reference) : createAudioReference()) {
+    bool valid = initialCode.size() == 6;
+    for (auto c : initialCode) valid = valid && c >= QLatin1Char('0') && c <= QLatin1Char('9');
+    if (valid) code_ = initialCode; else rotateCode();
+}
 Receiver::~Receiver() { stopReference(); }
 void Receiver::setReferenceDevice(const QString& id) {
     if (referenceDevice_ == id) return;
@@ -41,7 +45,8 @@ void Receiver::setReferenceDevice(const QString& id) {
     if (restart) startReference();
 }
 void Receiver::stopReference() {
-    referenceWanted_ = false;
+    referenceWanted_ = false; referenceFlowing_ = false; lastReferenceSent_ = 0;
+    emit referenceStatusChanged(tr("外放参考：未启用，手机开启回声抑制后自动使用"));
     if (referenceTimer_) { delete referenceTimer_; referenceTimer_ = nullptr; }
     reference_->stop();
 }
@@ -49,9 +54,11 @@ void Receiver::startReference() {
     stopReference();
     QString error;
     if (!reference_->supported() || !reference_->start(referenceDevice_, error)) {
-        reply(ownerSocket_, {{"type", "reference"}, {"state", "unavailable"}}); return;
+        reply(ownerSocket_, {{"type", "reference"}, {"state", "unavailable"}, {"detail", error.left(200)}});
+        emit referenceStatusChanged(tr("外放参考不可用：%1").arg(error)); return;
     }
-    referenceWanted_ = true; referenceSequence_ = 0;
+    referenceWanted_ = true; referenceSequence_ = 0; lastReferenceSent_ = referenceClockMicros();
+    emit referenceStatusChanged(tr("外放参考：已开启，等待电脑播放声音"));
     referenceEpoch_ = QRandomGenerator::system()->generate();
     referenceTimer_ = new QTimer(this); referenceTimer_->setTimerType(Qt::PreciseTimer); referenceTimer_->setInterval(10);
     connect(referenceTimer_, &QTimer::timeout, this, &Receiver::sendReferences); referenceTimer_->start();
@@ -60,7 +67,13 @@ void Receiver::startReference() {
 void Receiver::sendReferences() {
     const auto error = reference_->takeError();
     if (!error.isEmpty()) {
-        stopReference(); reply(ownerSocket_, {{"type", "reference"}, {"state", "unavailable"}}); return;
+        stopReference();
+        reply(ownerSocket_, {{"type", "reference"}, {"state", "unavailable"}, {"detail", error.left(200)}});
+        emit referenceStatusChanged(tr("外放参考不可用：%1").arg(error)); return;
+    }
+    if (referenceFlowing_ && referenceClockMicros() - lastReferenceSent_ > 1000000) {
+        referenceFlowing_ = false;
+        emit referenceStatusChanged(tr("外放参考：等待电脑播放声音；麦克风继续工作"));
     }
     ReferenceFrame frame;
     for (int count = 0; count < 16 && reference_->take(frame); ++count) {
@@ -80,7 +93,17 @@ void Receiver::sendReferences() {
                 const auto sample = static_cast<quint16>(frame.pcm[2*i + channel]);
                 body[48 + 2*i] = static_cast<char>(sample); body[49 + 2*i] = static_cast<char>(sample >> 8);
             }
-            socket_->writeDatagram(body + QMessageAuthenticationCode::hash(body, key_, QCryptographicHash::Sha256), peer_, peerPort_);
+            const auto bytes = body + QMessageAuthenticationCode::hash(body, key_, QCryptographicHash::Sha256);
+            if (socket_->writeDatagram(bytes, peer_, peerPort_) != bytes.size()) {
+                const auto error = socket_->errorString(); stopReference();
+                reply(ownerSocket_, {{"type", "reference"}, {"state", "unavailable"}, {"detail", error.left(200)}});
+                emit referenceStatusChanged(tr("外放参考回传失败：%1").arg(error)); return;
+            }
+        }
+        lastReferenceSent_ = referenceClockMicros();
+        if (!referenceFlowing_) {
+            referenceFlowing_ = true;
+            emit referenceStatusChanged(tr("外放参考：正在向已连接手机回传"));
         }
     }
 }
@@ -95,6 +118,7 @@ QByteArray Receiver::authenticate(const Packet& packet, const QByteArray& key) {
     return body + QMessageAuthenticationCode::hash(body, key, QCryptographicHash::Sha256);
 }
 void Receiver::startListening(quint16 port) {
+    if (listening_) { emit listening(server_->serverPort()); return; }
     stopListening(); rejected_ = 0; attempts_ = 0; attemptsWindow_.start();
     server_ = new QTcpServer(this); server_->setMaxPendingConnections(8);
     if (!server_->listen(QHostAddress::AnyIPv4, port)) {
@@ -114,10 +138,13 @@ void Receiver::startListening(quint16 port) {
     advertiser_ = new LanAdvertiser(this);
     connect(advertiser_, &LanAdvertiser::warning, this, &Receiver::discoveryWarning);
     advertiser_->start(server_->serverPort());
+    listening_ = true;
     emit listening(server_->serverPort());
 }
 void Receiver::stopListening() {
-    releaseOwner(QStringLiteral("pc"));
+    const bool wasListening = listening_; listening_ = false;
+    releaseOwner(QStringLiteral("stopped"));
+    if (wasListening) rotateCode();
     if (advertiser_) { delete advertiser_; advertiser_ = nullptr; }
     if (timer_) { delete timer_; timer_ = nullptr; }
     if (socket_) { delete socket_; socket_ = nullptr; }
@@ -127,6 +154,7 @@ void Receiver::stopListening() {
     emit stopped();
 }
 void Receiver::manualDisconnect() { releaseOwner(QStringLiteral("pc")); }
+void Receiver::refreshPairingCode() { rotateCode(); }
 void Receiver::releaseOwner(const QString& reason) {
     stopReference();
     if (ownerSocket_) {
@@ -137,7 +165,7 @@ void Receiver::releaseOwner(const QString& reason) {
     key_.fill(0); key_.clear(); peer_.clear(); peerName_.clear(); peerPort_ = 0; session_ = 0;
     haveAudio_ = online_ = false; seenSequences_ = 0; lastAudio_.invalidate(); buffer_.reset();
     if (timer_) timer_->setInterval(1000);
-    rotateCode(); emit peerChanged(QString()); emit connectionChanged(false, false);
+    emit peerChanged(QString()); emit connectionChanged(false, false);
 }
 void Receiver::acceptControls() {
     while (server_ && server_->hasPendingConnections()) {
@@ -220,7 +248,7 @@ void Receiver::handleControl(QTcpSocket* client, const QJsonObject& m) {
         const bool owns = !clientId_.isEmpty() && m.value("clientId").toString() == clientId_ &&
             sameBytes(m.value("token").toString().toLatin1(), token_.toLatin1());
         if (!owns) { reject("not_owner"); return; }
-        reply(client, {{"type", "disconnected"}, {"reason", "phone"}});
+        if (client != ownerSocket_) reply(client, {{"type", "disconnected"}, {"reason", "phone"}});
         releaseOwner("phone"); return;
     }
     if (type == "resume") {

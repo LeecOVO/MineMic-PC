@@ -107,7 +107,7 @@ def main():
             if source:
                 source.close()
             stream.close()
-        print('Paired, streamed, explicitly disconnected; PC code rotated.')
+        print('Paired, streamed, explicitly disconnected; PC pairing code preserved.')
         if args.reference: print('Authenticated reference packets:', reference_packets)
 if __name__ == '__main__':
     main()
