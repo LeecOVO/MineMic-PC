@@ -109,15 +109,11 @@ private:
         hr = device->GetId(&selectedId);
         if (FAILED(hr)) { fail("Reference endpoint identity", hr); return false; }
         const QString actualId = QString::fromWCharArray(selectedId); CoTaskMemFree(selectedId);
-        WAVEFORMATEX* mix = nullptr;
-        hr = client->GetMixFormat(&mix);
-        if (FAILED(hr)) { fail("Reference mix format", hr); return false; }
-        const auto channels = mix->nChannels; CoTaskMemFree(mix);
-        if (channels > 2) { fail("Reference supports mono/stereo speakers", AUDCLNT_E_UNSUPPORTED_FORMAT); return false; }
         WAVEFORMATEX format{};
         format.wFormatTag = WAVE_FORMAT_PCM; format.nChannels = 2; format.nSamplesPerSec = 48000;
         format.wBitsPerSample = 16; format.nBlockAlign = 4; format.nAvgBytesPerSec = 192000;
-        // Windows performs high-quality shared-mode format conversion, rather than a custom resampler.
+        // Shared-mode conversion includes the channel matrix as well as resampling.
+        // Do not reject surround endpoints before Windows can negotiate stereo loopback.
         hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED,
             AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
             AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
