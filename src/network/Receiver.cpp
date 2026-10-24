@@ -58,6 +58,7 @@ void Receiver::startReference() {
         emit referenceStatusChanged(tr("外放参考不可用：%1").arg(error)); return;
     }
     referenceWanted_ = true; referenceSequence_ = 0; lastReferenceSent_ = referenceClockMicros();
+    lastReferenceReport_ = lastReferenceSent_; referenceFramesRead_ = referenceStaleDrops_ = referenceFutureDrops_ = 0;
     emit referenceStatusChanged(tr("外放参考：已开启，等待电脑播放声音"));
     referenceEpoch_ = QRandomGenerator::system()->generate();
     referenceTimer_ = new QTimer(this); referenceTimer_->setTimerType(Qt::PreciseTimer); referenceTimer_->setInterval(10);
@@ -78,8 +79,13 @@ void Receiver::sendReferences() {
     ReferenceFrame frame;
     for (int count = 0; count < 16 && reference_->take(frame); ++count) {
         const auto now = referenceClockMicros();
-        if (!referenceWanted_ || !ownerSocket_ || !socket_ || !peerPort_ || !online_ ||
-            frame.timeMicros > now || now - frame.timeMicros > 50000) continue;
+        ++referenceFramesRead_;
+        if (!referenceWanted_ || !ownerSocket_ || !socket_ || !peerPort_ || !online_) continue;
+        // Endpoint playback timestamps may lead the delivery callback slightly.
+        // Match the mobile receiver's bounded 20 ms future window instead of
+        // discarding every frame from such endpoints as if capture were silent.
+        if (frame.timeMicros > now && frame.timeMicros - now > 20000) { ++referenceFutureDrops_; continue; }
+        if (frame.timeMicros <= now && now - frame.timeMicros > 50000) { ++referenceStaleDrops_; continue; }
         const auto sequence = referenceSequence_++;
         for (int channel = 0; channel < 2; ++channel) {
             QByteArray body(1008, '\0'); std::memcpy(body.data(), "MREF", 4);
@@ -101,10 +107,23 @@ void Receiver::sendReferences() {
             }
         }
         lastReferenceSent_ = referenceClockMicros();
+        referenceStaleDrops_ = referenceFutureDrops_ = 0;
         if (!referenceFlowing_) {
             referenceFlowing_ = true;
             emit referenceStatusChanged(tr("外放参考：正在向已连接手机回传"));
         }
+    }
+    if (referenceWanted_ && !referenceFlowing_ && referenceClockMicros() - lastReferenceReport_ >= 1000000) {
+        QString detail = reference_->status();
+        if (referenceStaleDrops_ || referenceFutureDrops_) {
+            detail += tr("；参考时间不同步：过期 %1 帧，超前 %2 帧").arg(referenceStaleDrops_).arg(referenceFutureDrops_);
+        } else if (referenceFramesRead_ && !peerPort_) {
+            detail += tr("；等待手机音频通道建立");
+        }
+        if (detail.isEmpty()) detail = tr("等待当前外放设备的播放数据");
+        emit referenceStatusChanged(tr("外放参考：%1").arg(detail));
+        reply(ownerSocket_, {{"type", "reference"}, {"state", "waiting"}, {"detail", detail.left(200)}});
+        lastReferenceReport_ = referenceClockMicros();
     }
 }
 void Receiver::rotateCode() {

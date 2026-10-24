@@ -19,6 +19,8 @@ public:
     virtual void stop() = 0;
     virtual bool take(ReferenceFrame& frame) = 0;
     virtual QString takeError() = 0;
+    // A bounded, non-sensitive description of capture progress, read off the audio worker.
+    virtual QString status() { return {}; }
 };
 std::unique_ptr<AudioReference> createAudioReference();
 std::uint64_t referenceClockMicros();

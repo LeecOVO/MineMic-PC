@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <audioclient.h>
 #include <mmdeviceapi.h>
+#include <functiondiscoverykeys_devpkey.h>
 #include <wrl/client.h>
 #include <cstring>
 #include <exception>
@@ -35,6 +36,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             desiredDevice_ = device; requested_ = true; ++generation_; read_ = write_ = count_ = 0; error_.clear();
+            status_ = QStringLiteral("正在打开外放设备");
         }
         if (!worker_.joinable()) {
             try { worker_ = std::thread([this] { workerLoop(); }); }
@@ -45,7 +47,7 @@ public:
     void stop() override {
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            desiredDevice_.clear(); requested_ = false; ++generation_; read_ = write_ = count_ = 0; error_.clear();
+            desiredDevice_.clear(); requested_ = false; ++generation_; read_ = write_ = count_ = 0; error_.clear(); status_.clear();
         }
         if (wake_) SetEvent(wake_);
         // No COM initialization/stop or thread join on the audio network thread.
@@ -58,6 +60,7 @@ public:
     QString takeError() override {
         std::lock_guard<std::mutex> lock(mutex_); auto error = error_; error_.clear(); return error;
     }
+    QString status() override { std::lock_guard<std::mutex> lock(mutex_); return status_; }
 private:
     void push(const ReferenceFrame& frame, std::uint64_t generation) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -71,6 +74,10 @@ private:
     void report(std::uint64_t generation, const QString& error) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!closing_ && generation_ == generation) error_ = error;
+    }
+    void reportStatus(std::uint64_t generation, const QString& status) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!closing_ && requested_ && generation_ == generation) status_ = status;
     }
     void workerLoop() {
         for (;;) {
@@ -109,6 +116,14 @@ private:
         hr = device->GetId(&selectedId);
         if (FAILED(hr)) { fail("Reference endpoint identity", hr); return false; }
         const QString actualId = QString::fromWCharArray(selectedId); CoTaskMemFree(selectedId);
+        QString deviceName = QStringLiteral("当前外放设备");
+        ComPtr<IPropertyStore> properties;
+        if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, &properties))) {
+            PROPVARIANT value; PropVariantInit(&value);
+            if (SUCCEEDED(properties->GetValue(PKEY_Device_FriendlyName, &value)) && value.vt == VT_LPWSTR)
+                deviceName = QString::fromWCharArray(value.pwszVal);
+            PropVariantClear(&value);
+        }
         WAVEFORMATEX format{};
         format.wFormatTag = WAVE_FORMAT_PCM; format.nChannels = 2; format.nSamplesPerSec = 48000;
         format.wBitsPerSample = 16; format.nBlockAlign = 4; format.nAvgBytesPerSec = 192000;
@@ -134,10 +149,22 @@ private:
         HANDLE events[] = {wake_, audio.value};
         bool failed = false, changedDefault = false;
         auto nextDefaultCheck = referenceClockMicros() + 1000000;
+        auto nextStatus = referenceClockMicros();
+        std::uint64_t packets = 0, invalidTiming = 0, oversized = 0;
+        std::uint64_t lastPacketAt = 0;
+        reportStatus(generation, QStringLiteral("%1 · 已打开，等待播放数据").arg(deviceName));
         while (!failed && current(generation)) {
             const auto event = WaitForMultipleObjects(2, events, FALSE, 50);
             if (event == WAIT_OBJECT_0) { if (!current(generation)) break; else continue; }
             if (event == WAIT_FAILED) { hr = HRESULT_FROM_WIN32(GetLastError()); failed = true; break; }
+            if (referenceClockMicros() >= nextStatus) {
+                const auto state = !packets ? QStringLiteral("尚未采集到播放数据") :
+                    referenceClockMicros() - lastPacketAt > 1000000 ? QStringLiteral("当前没有新的播放数据（已采集 %1 包）").arg(packets) :
+                    invalidTiming + oversized == packets ? QStringLiteral("采集数据或参考时间无效（时间异常 %1 / 数据过大 %2）").arg(invalidTiming).arg(oversized) :
+                    QStringLiteral("已采集 %1 包，时间异常 %2 包").arg(packets).arg(invalidTiming);
+                reportStatus(generation, QStringLiteral("%1 · %2").arg(deviceName, state));
+                nextStatus = referenceClockMicros() + 1000000;
+            }
             if (id.isEmpty() && referenceClockMicros() >= nextDefaultCheck) {
                 nextDefaultCheck = referenceClockMicros() + 1000000;
                 ComPtr<IMMDevice> currentDefault;
@@ -157,12 +184,16 @@ private:
                 hr = capture->GetBuffer(&bytes, &frames, &flags, &position, &qpc);
                 if (FAILED(hr)) { failed = true; break; }
                 if (!frames) break;
+                ++packets;
+                lastPacketAt = referenceClockMicros();
+                if ((flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) || !qpc) ++invalidTiming;
+                else if (frames > 8192) ++oversized;
                 const auto time = qpc / 10;
                 const auto difference = time > expectedTime ? time - expectedTime : expectedTime - time;
                 if ((flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) || (havePosition && difference > 3000)) { filled = 0; epoch = ++nextEpoch_; }
                 expectedTime = time + std::uint64_t(frames) * 1000000 / 48000; havePosition = true;
                 // Uncertain hardware timing is not a valid AEC reference.
-                if (!(flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) && frames <= 8192) {
+                if (!(flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) && qpc && frames <= 8192) {
                     for (UINT32 i = 0; i < frames; ++i) {
                         if (!filled) { pending.position = outputPosition + i; pending.timeMicros = time + std::uint64_t(i) * 1000000 / 48000; pending.epoch = epoch; }
                         if (flags & AUDCLNT_BUFFERFLAGS_SILENT) { pending.pcm[2*filled] = pending.pcm[2*filled+1] = 0; }
@@ -189,7 +220,7 @@ private:
     std::mutex mutex_;
     std::array<ReferenceFrame, 16> queue_{};
     std::size_t read_ = 0, write_ = 0, count_ = 0;
-    QString error_;
+    QString error_, status_;
 };
 std::unique_ptr<AudioReference> createAudioReference() { return std::make_unique<WasapiReference>(); }
 }

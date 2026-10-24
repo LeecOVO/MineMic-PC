@@ -74,6 +74,7 @@ private:
     bool referenceWanted_ = false, referenceFlowing_ = false;
     bool listening_ = false;
     quint64 lastReferenceSent_ = 0;
+    quint64 lastReferenceReport_ = 0, referenceFramesRead_ = 0, referenceStaleDrops_ = 0, referenceFutureDrops_ = 0;
     quint32 referenceSequence_ = 0, referenceEpoch_ = 0;
 };
 }

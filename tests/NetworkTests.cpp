@@ -40,18 +40,22 @@ QJsonObject connectRequest(QString id, QString nonce, QString code = {}) {
 class TestReference final : public AudioReference {
 public:
     bool active = false;
+    bool available = true;
+    std::int64_t timestampOffset = -10000;
     QString error;
     bool supported() const override { return true; }
     bool start(const QString&, QString&) override { active = true; return true; }
     void stop() override { active = false; }
     bool take(ReferenceFrame& out) override {
         const auto now = referenceClockMicros();
-        if (!active || now - last_ < 10000) return false;
-        last_ = now; out.position = position_; position_ += 480; out.timeMicros = now - 10000; out.epoch = 1;
+        if (!active || !available || now - last_ < 10000) return false;
+        last_ = now; out.position = position_; position_ += 480;
+        out.timeMicros = static_cast<std::uint64_t>(static_cast<std::int64_t>(now) + timestampOffset); out.epoch = 1;
         for (int i = 0; i < 480; ++i) { out.pcm[2*i] = 1000; out.pcm[2*i+1] = -2000; }
         return true;
     }
     QString takeError() override { const auto result = error; error.clear(); return result; }
+    QString status() override { return QStringLiteral("Test speakers · 尚未采集到播放数据"); }
 private:
     std::uint64_t position_ = 0, last_ = 0;
 };
@@ -94,11 +98,46 @@ void referenceTests() {
     check(rpc(stranger, connectRequest(QString(32, 'c'), QString(32, 'd')))["reason"] == "busy", "reference disconnect preserves first owner");
     receiver.stopListening();
 }
+void referenceTimingTests() {
+    for (const auto offset : {10000, 100000, -100000, 0}) {
+        AudioBuffer buffer;
+        auto source = std::make_unique<TestReference>(); auto* native = source.get();
+        native->timestampOffset = offset; native->available = offset != 0;
+        Receiver receiver(buffer, nullptr, std::move(source)); quint16 port = 0;
+        QObject::connect(&receiver, &Receiver::listening, [&](quint16 p) { port = p; });
+        receiver.startListening(0); const auto code = receiver.pairingCode();
+        QTcpSocket owner; connectTo(owner, port);
+        const auto welcome = rpc(owner, connectRequest(QString(32, 'a'), QString(32, 'b')));
+        QUdpSocket audio; Packet packet; packet.type = PacketType::Audio;
+        packet.session = welcome["session"].toString().toUInt(); packet.payload.resize(MaxPayload);
+        audio.writeDatagram(Receiver::authenticate(packet, QByteArray::fromHex(welcome["key"].toString().toLatin1())), QHostAddress::LocalHost, port);
+        check(until([&] { return buffer.stats().accepted == 1; }), "timing test binds authenticated audio destination");
+        check(rpc(owner, {{"type", "reference"}, {"enabled", "1"}})["state"] == "starting", "timing test starts reference");
+        if (offset == 10000) {
+            check(until([&] { return audio.hasPendingDatagrams(); }), "slightly future playback references reach phone instead of being discarded");
+        } else {
+            check(until([&] { return owner.canReadLine(); }, 2400), "waiting reference reports its actual capture stage");
+            const auto report = QJsonDocument::fromJson(owner.readLine()).object();
+            check(report["state"] == "waiting" && report["detail"].toString().contains("Test speakers"), "capture status names the actual reference endpoint");
+            if (offset > 0) check(report["detail"].toString().contains(QStringLiteral("超前")), "far-future reference rejection is visible");
+            if (offset < 0) check(report["detail"].toString().contains(QStringLiteral("过期")), "stale reference rejection is visible");
+            check(!audio.hasPendingDatagrams(), "invalid or unavailable reference never sends fabricated audio");
+        }
+        check(native->active && receiver.pairingCode() == code, "reference waiting preserves capture request and pairing code");
+        receiver.stopListening();
+    }
+}
 }
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv); AudioBuffer buffer;
-    const bool referenceFixture = argc > 1 && (QString::fromLocal8Bit(argv[1]) == "--serve-reference" || QString::fromLocal8Bit(argv[1]) == "--python-reference-sender");
-    Receiver receiver(buffer, nullptr, referenceFixture ? std::make_unique<TestReference>() : nullptr);
+    const bool waitingFixture = argc > 1 && QString::fromLocal8Bit(argv[1]) == "--serve-reference-waiting";
+    const bool referenceFixture = waitingFixture || (argc > 1 && (QString::fromLocal8Bit(argv[1]) == "--serve-reference" || QString::fromLocal8Bit(argv[1]) == "--python-reference-sender"));
+    std::unique_ptr<AudioReference> reference;
+    if (referenceFixture) {
+        auto source = std::make_unique<TestReference>(); source->available = !waitingFixture;
+        reference = std::move(source);
+    }
+    Receiver receiver(buffer, nullptr, std::move(reference));
     quint16 port = 0; bool locked = false;
     QObject::connect(&receiver, &Receiver::listening, [&](quint16 p) { port = p; });
     QObject::connect(&receiver, &Receiver::connectionChanged, [&](bool owner, bool) { locked = owner; });
@@ -188,6 +227,6 @@ int main(int argc, char** argv) {
     check(LanAdvertiser::relevantQuery(query, "x", "y"), "Bonjour browse query recognized");
     QByteArray malicious(12, '\0'); malicious[5] = 1; malicious += QByteArray::fromHex("c00c000c0001");
     check(!LanAdvertiser::relevantQuery(malicious, "x", "y"), "DNS compression loop bounded");
-    receiver.stopListening(); referenceTests();
+    receiver.stopListening(); referenceTests(); referenceTimingTests();
     std::cout << "Pairing, first-owner lock, resume, rotation, audio, reference and DNS tests passed\n";
 }
