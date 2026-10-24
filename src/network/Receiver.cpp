@@ -133,6 +133,9 @@ void Receiver::sendReferences() {
         emit referenceStatusChanged(tr("外放参考：%1").arg(detail));
         reply(ownerSocket_, {{"type", "reference"}, {"state", "waiting"}, {"detail", detail.left(200)}});
         lastReferenceReport_ = referenceClockMicros();
+    } else if (referenceFlowing_ && referenceClockMicros() - lastReferenceReport_ >= 1000000) {
+        emit referenceStatusChanged(tr("外放参考：正在向已连接手机回传；%1").arg(reference_->status()));
+        lastReferenceReport_ = referenceClockMicros();
     }
 }
 void Receiver::rotateCode() {

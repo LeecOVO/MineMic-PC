@@ -1,8 +1,12 @@
 #include "audio/AudioReference.h"
+#include "audio/ReferenceTiming.h"
+#include "audio/ReferencePcm.h"
 #include <windows.h>
 #include <audioclient.h>
 #include <mmdeviceapi.h>
 #include <functiondiscoverykeys_devpkey.h>
+#include <ks.h>
+#include <ksmedia.h>
 #include <wrl/client.h>
 #include <cstring>
 #include <exception>
@@ -127,13 +131,32 @@ private:
         WAVEFORMATEX format{};
         format.wFormatTag = WAVE_FORMAT_PCM; format.nChannels = 2; format.nSamplesPerSec = 48000;
         format.wBitsPerSample = 16; format.nBlockAlign = 4; format.nAvgBytesPerSec = 192000;
-        // Shared-mode conversion includes the channel matrix as well as resampling.
-        // Do not reject surround endpoints before Windows can negotiate stereo loopback.
+        // Follow the endpoint mix format when it already runs at our wire rate.
+        // This avoids inserting Windows format conversion into reference timing.
+        WAVEFORMATEX* mix = nullptr;
+        bool native = false, floating = false;
+        if (SUCCEEDED(client->GetMixFormat(&mix)) && mix) {
+            const bool extensible = mix->wFormatTag == WAVE_FORMAT_EXTENSIBLE && mix->cbSize >= 22;
+            const auto* extended = extensible ? reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(mix) : nullptr;
+            floating = mix->wFormatTag == WAVE_FORMAT_IEEE_FLOAT || (extended && IsEqualGUID(extended->SubFormat, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT));
+            const bool integer = mix->wFormatTag == WAVE_FORMAT_PCM || (extended && IsEqualGUID(extended->SubFormat, KSDATAFORMAT_SUBTYPE_PCM));
+            native = mix->nSamplesPerSec == 48000 && (mix->nChannels == 1 || mix->nChannels == 2) &&
+                ((floating && mix->wBitsPerSample == 32) || (integer && (mix->wBitsPerSample == 16 || mix->wBitsPerSample == 24 || mix->wBitsPerSample == 32))) &&
+                mix->nBlockAlign == mix->nChannels * mix->wBitsPerSample / 8;
+        }
+        const auto inputChannels = native ? mix->nChannels : format.nChannels;
+        const auto inputBits = native ? mix->wBitsPerSample : format.wBitsPerSample;
+        const auto inputStride = native ? mix->nBlockAlign : format.nBlockAlign;
+        floating = native && floating;
+        const DWORD conversion = native ? 0 : AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+        // Other rates/layouts retain Windows' channel matrix and resampling.
         hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
-            AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-            0, 0, &format, nullptr);
+            AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK | conversion,
+            0, 0, native ? mix : &format, nullptr);
+        if (mix) CoTaskMemFree(mix);
         if (FAILED(hr)) { fail("Reference loopback format", hr); return false; }
+        REFERENCE_TIME latency = 0;
+        const auto latencyMs = SUCCEEDED(client->GetStreamLatency(&latency)) ? latency / 10000 : -1;
         Handle audio; audio.value = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (!audio.value) { fail("Reference event", HRESULT_FROM_WIN32(GetLastError())); return false; }
         hr = client->SetEventHandle(audio.value);
@@ -145,6 +168,7 @@ private:
         if (FAILED(hr)) { fail("Reference start", hr); return false; }
         if (!current(generation)) { client->Stop(); return false; }
         ReferenceFrame pending; std::size_t filled = 0; std::uint32_t epoch = ++nextEpoch_;
+        ReferenceTiming timing;
         std::uint64_t expectedTime = 0, outputPosition = 0; bool havePosition = false;
         HANDLE events[] = {wake_, audio.value};
         bool failed = false, changedDefault = false;
@@ -152,6 +176,8 @@ private:
         auto nextStatus = referenceClockMicros();
         std::uint64_t packets = 0, invalidTiming = 0, oversized = 0;
         std::uint64_t lastPacketAt = 0;
+        bool estimated = false;
+        std::int64_t rawLead = 0;
         reportStatus(generation, QStringLiteral("%1 · 已打开，等待播放数据").arg(deviceName));
         while (!failed && current(generation)) {
             const auto event = WaitForMultipleObjects(2, events, FALSE, 50);
@@ -160,9 +186,11 @@ private:
             if (referenceClockMicros() >= nextStatus) {
                 const auto state = !packets ? QStringLiteral("尚未采集到播放数据") :
                     referenceClockMicros() - lastPacketAt > 1000000 ? QStringLiteral("当前没有新的播放数据（已采集 %1 包）").arg(packets) :
-                    invalidTiming + oversized == packets ? QStringLiteral("采集数据或参考时间无效（时间异常 %1 / 数据过大 %2）").arg(invalidTiming).arg(oversized) :
-                    QStringLiteral("已采集 %1 包，时间异常 %2 包").arg(packets).arg(invalidTiming);
-                reportStatus(generation, QStringLiteral("%1 · %2").arg(deviceName, state));
+                    !estimated && invalidTiming + oversized == packets ? QStringLiteral("采集数据或参考时间无效（时间异常 %1 / 数据过大 %2）").arg(invalidTiming).arg(oversized) :
+                    QStringLiteral("已采集 %1 包，原始时间异常 %2 包").arg(packets).arg(invalidTiming);
+                const auto clock = estimated ? QStringLiteral("时间估计，原始领先 %1 ms").arg(rawLead / 1000) : QStringLiteral("设备时间");
+                reportStatus(generation, QStringLiteral("%1 · %2；%3；%4 / 流延迟 %5 ms")
+                    .arg(deviceName, state, clock, native ? QStringLiteral("原生格式") : QStringLiteral("系统格式转换")).arg(latencyMs));
                 nextStatus = referenceClockMicros() + 1000000;
             }
             if (id.isEmpty() && referenceClockMicros() >= nextDefaultCheck) {
@@ -188,16 +216,23 @@ private:
                 lastPacketAt = referenceClockMicros();
                 if ((flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) || !qpc) ++invalidTiming;
                 else if (frames > 8192) ++oversized;
-                const auto time = qpc / 10;
+                rawLead = static_cast<std::int64_t>(qpc / 10) - static_cast<std::int64_t>(lastPacketAt);
+                const auto stamp = timing.observe(position, frames, 48000, qpc / 10, lastPacketAt,
+                    (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) != 0, (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0);
+                const auto time = stamp.time; estimated = stamp.estimated;
                 const auto difference = time > expectedTime ? time - expectedTime : expectedTime - time;
-                if ((flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) || (havePosition && difference > 3000)) { filled = 0; epoch = ++nextEpoch_; }
+                if (stamp.reset || (havePosition && difference > 3000)) { filled = 0; epoch = ++nextEpoch_; }
                 expectedTime = time + std::uint64_t(frames) * 1000000 / 48000; havePosition = true;
-                // Uncertain hardware timing is not a valid AEC reference.
-                if (!(flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) && qpc && frames <= 8192) {
+                if (time && frames <= 8192) {
                     for (UINT32 i = 0; i < frames; ++i) {
                         if (!filled) { pending.position = outputPosition + i; pending.timeMicros = time + std::uint64_t(i) * 1000000 / 48000; pending.epoch = epoch; }
                         if (flags & AUDCLNT_BUFFERFLAGS_SILENT) { pending.pcm[2*filled] = pending.pcm[2*filled+1] = 0; }
-                        else if (bytes) std::memcpy(pending.pcm.data() + 2*filled, bytes + 4*i, 4);
+                        else if (bytes) {
+                            for (int channel = 0; channel < 2; ++channel) {
+                                const auto* sample = bytes + inputStride*i + (inputChannels == 1 ? 0 : channel) * inputBits/8;
+                                pending.pcm[2*filled + channel] = referenceSample(sample, inputBits, floating);
+                            }
+                        }
                         else { filled = 0; epoch = ++nextEpoch_; break; }
                         if (++filled == 480) { push(pending, generation); filled = 0; }
                     }

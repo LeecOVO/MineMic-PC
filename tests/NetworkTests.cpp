@@ -1,5 +1,6 @@
 #include "network/Receiver.h"
 #include "network/LanAdvertiser.h"
+#include "audio/ReferenceTiming.h"
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QEventLoop>
@@ -41,6 +42,7 @@ class TestReference final : public AudioReference {
 public:
     bool active = false;
     bool available = true;
+    bool estimateInvalidClock = false;
     std::int64_t timestampOffset = -10000;
     QString error;
     bool supported() const override { return true; }
@@ -54,6 +56,10 @@ public:
         if (timestampOffset > 0 ? captureTime > now : now - last_ < 10000) return false;
         last_ = now; out.position = position_; position_ += 480;
         out.timeMicros = static_cast<std::uint64_t>(static_cast<std::int64_t>(captureTime) + timestampOffset); out.epoch = 1;
+        if (estimateInvalidClock) {
+            out.timeMicros = timing_.observe(out.position, 480, 48000, out.timeMicros, now, false, false).time;
+            if (!out.timeMicros) return false;
+        }
         for (int i = 0; i < 480; ++i) { out.pcm[2*i] = 1000; out.pcm[2*i+1] = -2000; }
         return true;
     }
@@ -61,6 +67,7 @@ public:
     QString status() override { return QStringLiteral("Test speakers · 尚未采集到播放数据"); }
 private:
     std::uint64_t position_ = 0, last_ = 0, origin_ = 0;
+    ReferenceTiming timing_;
 };
 void referenceTests() {
     AudioBuffer buffer;
@@ -102,10 +109,11 @@ void referenceTests() {
     receiver.stopListening();
 }
 void referenceTimingTests() {
-    for (const auto offset : {10000, 100000, 300000, -100000, 0}) {
+    for (const auto offset : {10000, 100000, 250000, 300000, -100000, 0}) {
         AudioBuffer buffer;
         auto source = std::make_unique<TestReference>(); auto* native = source.get();
         native->timestampOffset = offset; native->available = offset != 0;
+        native->estimateInvalidClock = offset == 250000;
         Receiver receiver(buffer, nullptr, std::move(source)); quint16 port = 0;
         QObject::connect(&receiver, &Receiver::listening, [&](quint16 p) { port = p; });
         receiver.startListening(0); const auto code = receiver.pairingCode();
@@ -116,7 +124,7 @@ void referenceTimingTests() {
         audio.writeDatagram(Receiver::authenticate(packet, QByteArray::fromHex(welcome["key"].toString().toLatin1())), QHostAddress::LocalHost, port);
         check(until([&] { return buffer.stats().accepted == 1; }), "timing test binds authenticated audio destination");
         check(rpc(owner, {{"type", "reference"}, {"enabled", "1"}})["state"] == "starting", "timing test starts reference");
-        if (offset == 10000 || offset == 100000) {
+        if (offset == 10000 || offset == 100000 || offset == 250000) {
             const auto started = referenceClockMicros();
             check(until([&] { return audio.hasPendingDatagrams(); }), "slightly future playback references reach phone instead of being discarded");
             if (offset == 100000) {
