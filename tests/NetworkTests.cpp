@@ -48,16 +48,19 @@ public:
     void stop() override { active = false; }
     bool take(ReferenceFrame& out) override {
         const auto now = referenceClockMicros();
-        if (!active || !available || now - last_ < 10000) return false;
+        if (!active || !available) return false;
+        if (!origin_) origin_ = now;
+        const auto captureTime = timestampOffset > 0 ? origin_ + position_ * 1000000 / 48000 : now;
+        if (timestampOffset > 0 ? captureTime > now : now - last_ < 10000) return false;
         last_ = now; out.position = position_; position_ += 480;
-        out.timeMicros = static_cast<std::uint64_t>(static_cast<std::int64_t>(now) + timestampOffset); out.epoch = 1;
+        out.timeMicros = static_cast<std::uint64_t>(static_cast<std::int64_t>(captureTime) + timestampOffset); out.epoch = 1;
         for (int i = 0; i < 480; ++i) { out.pcm[2*i] = 1000; out.pcm[2*i+1] = -2000; }
         return true;
     }
     QString takeError() override { const auto result = error; error.clear(); return result; }
     QString status() override { return QStringLiteral("Test speakers · 尚未采集到播放数据"); }
 private:
-    std::uint64_t position_ = 0, last_ = 0;
+    std::uint64_t position_ = 0, last_ = 0, origin_ = 0;
 };
 void referenceTests() {
     AudioBuffer buffer;
@@ -99,7 +102,7 @@ void referenceTests() {
     receiver.stopListening();
 }
 void referenceTimingTests() {
-    for (const auto offset : {10000, 100000, -100000, 0}) {
+    for (const auto offset : {10000, 100000, 300000, -100000, 0}) {
         AudioBuffer buffer;
         auto source = std::make_unique<TestReference>(); auto* native = source.get();
         native->timestampOffset = offset; native->available = offset != 0;
@@ -113,8 +116,16 @@ void referenceTimingTests() {
         audio.writeDatagram(Receiver::authenticate(packet, QByteArray::fromHex(welcome["key"].toString().toLatin1())), QHostAddress::LocalHost, port);
         check(until([&] { return buffer.stats().accepted == 1; }), "timing test binds authenticated audio destination");
         check(rpc(owner, {{"type", "reference"}, {"enabled", "1"}})["state"] == "starting", "timing test starts reference");
-        if (offset == 10000) {
+        if (offset == 10000 || offset == 100000) {
+            const auto started = referenceClockMicros();
             check(until([&] { return audio.hasPendingDatagrams(); }), "slightly future playback references reach phone instead of being discarded");
+            if (offset == 100000) {
+                check(referenceClockMicros() - started >= 50000, "scheduled reference waits for playback time without falsifying timestamps");
+                QByteArray bytes(static_cast<qsizetype>(audio.pendingDatagramSize()), '\0'); audio.readDatagram(bytes.data(), bytes.size());
+                std::uint64_t timestamp = 0;
+                for (int i = 24; i < 32; ++i) timestamp = (timestamp << 8) | static_cast<unsigned char>(bytes[i]);
+                check(timestamp <= referenceClockMicros() + 21000, "delivered reference fits the existing phone future window");
+            }
         } else {
             check(until([&] { return owner.canReadLine(); }, 2400), "waiting reference reports its actual capture stage");
             const auto report = QJsonDocument::fromJson(owner.readLine()).object();

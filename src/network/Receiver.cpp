@@ -46,6 +46,7 @@ void Receiver::setReferenceDevice(const QString& id) {
 }
 void Receiver::stopReference() {
     referenceWanted_ = false; referenceFlowing_ = false; lastReferenceSent_ = 0;
+    pendingReference_.reset(); referenceFutureLead_ = 0;
     emit referenceStatusChanged(tr("外放参考：未启用，手机开启回声抑制后自动使用"));
     if (referenceTimer_) { delete referenceTimer_; referenceTimer_ = nullptr; }
     reference_->stop();
@@ -77,14 +78,22 @@ void Receiver::sendReferences() {
         emit referenceStatusChanged(tr("外放参考：等待电脑播放声音；麦克风继续工作"));
     }
     ReferenceFrame frame;
-    for (int count = 0; count < 16 && reference_->take(frame); ++count) {
+    for (int count = 0; count < 16; ++count) {
+        if (pendingReference_) { frame = *pendingReference_; pendingReference_.reset(); }
+        else {
+            if (!reference_->take(frame)) break;
+            ++referenceFramesRead_;
+        }
         const auto now = referenceClockMicros();
-        ++referenceFramesRead_;
         if (!referenceWanted_ || !ownerSocket_ || !socket_ || !peerPort_ || !online_) continue;
-        // Endpoint playback timestamps may lead the delivery callback slightly.
-        // Match the mobile receiver's bounded 20 ms future window instead of
-        // discarding every frame from such endpoints as if capture were silent.
-        if (frame.timeMicros > now && frame.timeMicros - now > 20000) { ++referenceFutureDrops_; continue; }
+        // Loopback may expose audio before its scheduled physical playback.
+        // Hold one frame until it enters the phone's existing 20 ms window;
+        // never rewrite its timestamp or delay the microphone upload path.
+        if (frame.timeMicros > now && frame.timeMicros - now > 20000) {
+            const auto lead = frame.timeMicros - now;
+            if (lead <= 200000) { pendingReference_ = frame; break; }
+            ++referenceFutureDrops_; referenceFutureLead_ = lead; continue;
+        }
         if (frame.timeMicros <= now && now - frame.timeMicros > 50000) { ++referenceStaleDrops_; continue; }
         const auto sequence = referenceSequence_++;
         for (int channel = 0; channel < 2; ++channel) {
@@ -116,7 +125,7 @@ void Receiver::sendReferences() {
     if (referenceWanted_ && !referenceFlowing_ && referenceClockMicros() - lastReferenceReport_ >= 1000000) {
         QString detail = reference_->status();
         if (referenceStaleDrops_ || referenceFutureDrops_) {
-            detail += tr("；参考时间不同步：过期 %1 帧，超前 %2 帧").arg(referenceStaleDrops_).arg(referenceFutureDrops_);
+            detail += tr("；参考时间不同步：过期 %1 帧，超前 %2 帧（领先 %3 ms）").arg(referenceStaleDrops_).arg(referenceFutureDrops_).arg(referenceFutureLead_ / 1000);
         } else if (referenceFramesRead_ && !peerPort_) {
             detail += tr("；等待手机音频通道建立");
         }

@@ -218,7 +218,8 @@ private:
     std::uint32_t nextEpoch_ = 0;
     std::thread worker_;
     std::mutex mutex_;
-    std::array<ReferenceFrame, 16> queue_{};
+    // Covers the receiver's 200 ms scheduling horizon plus bounded delivery jitter.
+    std::array<ReferenceFrame, 32> queue_{};
     std::size_t read_ = 0, write_ = 0, count_ = 0;
     QString error_, status_;
 };

@@ -8,6 +8,7 @@
 #include <QObject>
 #include <QPointer>
 #include <QHash>
+#include <optional>
 class QTcpServer;
 class QTcpSocket;
 class QUdpSocket;
@@ -75,6 +76,8 @@ private:
     bool listening_ = false;
     quint64 lastReferenceSent_ = 0;
     quint64 lastReferenceReport_ = 0, referenceFramesRead_ = 0, referenceStaleDrops_ = 0, referenceFutureDrops_ = 0;
+    quint64 referenceFutureLead_ = 0;
+    std::optional<ReferenceFrame> pendingReference_;
     quint32 referenceSequence_ = 0, referenceEpoch_ = 0;
 };
 }
