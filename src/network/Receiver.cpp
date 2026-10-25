@@ -32,7 +32,8 @@ bool hexId(const QString& value) {
 }
 }
 Receiver::Receiver(AudioBuffer& buffer, QObject* parent, std::unique_ptr<AudioReference> reference, const QString& initialCode)
-    : QObject(parent), buffer_(buffer), reference_(reference ? std::move(reference) : createAudioReference()) {
+    : QObject(parent), buffer_(buffer), instance_(QString::fromLatin1(randomBytes(16).toHex())),
+      reference_(reference ? std::move(reference) : createAudioReference()) {
     bool valid = initialCode.size() == 6;
     for (auto c : initialCode) valid = valid && c >= QLatin1Char('0') && c <= QLatin1Char('9');
     if (valid) code_ = initialCode; else rotateCode();
@@ -180,8 +181,11 @@ void Receiver::stopListening() {
     if (timer_) { delete timer_; timer_ = nullptr; }
     if (socket_) { delete socket_; socket_ = nullptr; }
     if (server_) { delete server_; server_ = nullptr; }
-    const auto clients = controls_.keys(); controls_.clear();
-    for (auto* client : clients) { client->disconnect(this); client->abort(); client->deleteLater(); }
+    const auto clients = controls_.keys();
+    for (auto* client : clients) {
+        if (closingControls_.contains(client)) continue;
+        client->abort();
+    }
     emit stopped();
 }
 void Receiver::manualDisconnect() { releaseOwner(QStringLiteral("pc")); }
@@ -189,14 +193,22 @@ void Receiver::refreshPairingCode() { rotateCode(); }
 void Receiver::releaseOwner(const QString& reason) {
     stopReference();
     if (ownerSocket_) {
-        reply(ownerSocket_, {{"type", "disconnected"}, {"reason", reason}});
-        ownerSocket_->disconnectFromHost();
+        finishControl(ownerSocket_, reason);
     }
     ownerSocket_.clear(); clientId_.clear(); connectNonce_.clear(); token_.fill(QLatin1Char('0')); token_.clear();
     key_.fill(0); key_.clear(); peer_.clear(); peerName_.clear(); peerPort_ = 0; session_ = 0;
     haveAudio_ = online_ = false; seenSequences_ = 0; lastAudio_.invalidate(); buffer_.reset();
     if (timer_) timer_->setInterval(1000);
     emit peerChanged(QString()); emit connectionChanged(false, false);
+}
+void Receiver::finishControl(QTcpSocket* client, const QString& reason) {
+    if (!client || closingControls_.contains(client)) return;
+    const auto closeId = QString::fromLatin1(randomBytes(8).toHex());
+    closingControls_.insert(client, closeId);
+    reply(client, {{"type", "disconnected"}, {"reason", reason}, {"closeId", closeId}});
+    // Logical ownership is already released. Never block the network/UI thread
+    // waiting for an application ACK, including old or unreachable clients.
+    QTimer::singleShot(200, client, [client] { client->abort(); });
 }
 void Receiver::acceptControls() {
     while (server_ && server_->hasPendingConnections()) {
@@ -207,7 +219,7 @@ void Receiver::acceptControls() {
         connect(client, &QTcpSocket::readyRead, this, [this, client] { readControl(client); });
         connect(client, &QTcpSocket::disconnected, this, [this, client] {
             if (ownerSocket_ == client) { stopReference(); ownerSocket_.clear(); online_ = false; emit connectionChanged(true, false); }
-            controls_.remove(client); client->deleteLater();
+            controls_.remove(client); closingControls_.remove(client); client->deleteLater();
         });
         QTimer::singleShot(5000, client, [this, client] { if (ownerSocket_ != client) client->disconnectFromHost(); });
     }
@@ -245,14 +257,20 @@ void Receiver::welcome(QTcpSocket* client, const QString& nonce, bool resume) {
     lastAudio_.start(); online_ = true; timer_->setInterval(250);
     reply(client, {{"type", "welcome"}, {"nonce", nonce}, {"session", QString::number(session_)},
                    {"key", QString::fromLatin1(key_.toHex())}, {"token", token_},
+                   {"instance", instance_},
                    {"pcName", QHostInfo::localHostName()}, {"port", QString::number(server_->serverPort())},
                    {"caps", reference_->supported() ? "ref-pcm-stereo-v1" : ""}});
     emit peerChanged(QStringLiteral("%1 (%2)").arg(peerName_, peer_.toString())); emit connectionChanged(true, true);
 }
 void Receiver::handleControl(QTcpSocket* client, const QJsonObject& m) {
-    auto reject = [&](const QString& reason) { reply(client, {{"type", "error"}, {"reason", reason}}); };
+    auto reject = [&](const QString& reason) { reply(client, {{"type", "error"}, {"reason", reason}, {"instance", instance_}}); };
     if (m.value("app") != "MineMic" || m.value("v") != "2") { reject("version"); client->disconnectFromHost(); return; }
     const auto type = m.value("type").toString();
+    if (closingControls_.contains(client)) {
+        if (type == "disconnect_ack" && m.value("closeId").toString() == closingControls_.value(client)) client->disconnectFromHost();
+        return;
+    }
+    if (!listening_) { reject("stopped"); client->disconnectFromHost(); return; }
     if (type == "clock" && ownerSocket_ == client && reference_->supported()) {
         const auto received = referenceClockMicros();
         bool valid = false; const auto t1 = m.value("t1").toString(); t1.toULongLong(&valid);
@@ -279,7 +297,7 @@ void Receiver::handleControl(QTcpSocket* client, const QJsonObject& m) {
         const bool owns = !clientId_.isEmpty() && m.value("clientId").toString() == clientId_ &&
             sameBytes(m.value("token").toString().toLatin1(), token_.toLatin1());
         if (!owns) { reject("not_owner"); return; }
-        if (client != ownerSocket_) reply(client, {{"type", "disconnected"}, {"reason", "phone"}});
+        if (client != ownerSocket_) finishControl(client, QStringLiteral("phone"));
         releaseOwner("phone"); return;
     }
     if (type == "resume") {

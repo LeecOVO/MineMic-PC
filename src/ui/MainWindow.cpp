@@ -220,7 +220,14 @@ MainWindow::MainWindow() : output_(createAudioOutput()) {
 }
 
 MainWindow::~MainWindow() {
-    stop(); networkThread_.quit(); networkThread_.wait();
+    stop();
+    if (networkThread_.isRunning()) {
+        // Allow the bounded final notification to drain when quitting too.
+        QMetaObject::invokeMethod(receiver_, [this] {
+            QTimer::singleShot(200, receiver_, [this] { networkThread_.quit(); });
+        }, Qt::QueuedConnection);
+        networkThread_.wait();
+    }
     QSettings settings;
     settings.setValue(QStringLiteral("port"), port_->value());
     settings.setValue(QStringLiteral("device"), devices_->currentData());

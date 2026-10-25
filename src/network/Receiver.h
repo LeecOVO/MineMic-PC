@@ -47,6 +47,7 @@ private:
     void receivePending();
     void tick();
     void releaseOwner(const QString& reason);
+    void finishControl(QTcpSocket* client, const QString& reason);
     void rotateCode();
     void stopReference();
     void startReference();
@@ -57,6 +58,8 @@ private:
     QTimer* timer_ = nullptr;
     LanAdvertiser* advertiser_ = nullptr;
     QHash<QTcpSocket*, QByteArray> controls_;
+    QHash<QTcpSocket*, QString> closingControls_;
+    const QString instance_;
     QPointer<QTcpSocket> ownerSocket_;
     QString code_, clientId_, connectNonce_, token_, peerName_;
     QByteArray key_;

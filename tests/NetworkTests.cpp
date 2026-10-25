@@ -146,6 +146,36 @@ void referenceTimingTests() {
         receiver.stopListening();
     }
 }
+void disconnectHandshakeTests() {
+    AudioBuffer buffer; Receiver receiver(buffer); quint16 port = 0; bool locked = false;
+    QObject::connect(&receiver, &Receiver::listening, [&](quint16 p) { port = p; });
+    QObject::connect(&receiver, &Receiver::connectionChanged, [&](bool value, bool) { locked = value; });
+    receiver.startListening(0); const auto code = receiver.pairingCode();
+    QTcpSocket first; connectTo(first, port);
+    auto welcome = rpc(first, connectRequest(QString(32, 'a'), QString(32, 'b')));
+    check(welcome["instance"].toString().size() == 32, "server process advertises an opaque restart identity");
+    QElapsedTimer elapsed; elapsed.start(); receiver.manualDisconnect();
+    check(!locked && elapsed.elapsed() < 150 && receiver.pairingCode() == code, "PC release changes logical state immediately without waiting for ACK");
+    check(until([&] { return first.canReadLine(); }, 150), "PC disconnect notification is flushed before closing TCP");
+    auto fin = QJsonDocument::fromJson(first.readLine()).object();
+    check(fin["type"] == "disconnected" && fin["reason"] == "pc" && !fin["closeId"].toString().isEmpty(), "PC sends an identifiable disconnect notification");
+    QTcpSocket next; connectTo(next, port);
+    check(rpc(next, connectRequest(QString(32, 'c'), QString(32, 'd')))["type"] == "welcome", "new owner can connect while old FIN waits for ACK");
+    first.write(QJsonDocument(QJsonObject{{"app", "MineMic"}, {"v", "2"}, {"type", "disconnect_ack"}, {"closeId", fin["closeId"]}}).toJson(QJsonDocument::Compact) + '\n');
+    check(until([&] { return first.state() == QAbstractSocket::UnconnectedState; }, 350), "acknowledged old control is reclaimed");
+    check(locked && rpc(next, {{"type", "ping"}})["type"] == "pong", "late ACK cannot release a new owner's session");
+    elapsed.restart(); receiver.stopListening();
+    check(!locked && elapsed.elapsed() < 150 && receiver.pairingCode() != code, "stop immediately releases ownership and rotates pairing code");
+    check(until([&] { return next.canReadLine(); }, 150), "stopping receiver does not abort its unsent notification");
+    fin = QJsonDocument::fromJson(next.readLine()).object();
+    check(fin["type"] == "disconnected" && fin["reason"] == "stopped", "phone is told that PC reception stopped");
+    receiver.startListening(port);
+    QTcpSocket again; connectTo(again, port);
+    check(rpc(again, connectRequest(QString(32, 'a'), QString(32, 'b')))["type"] == "welcome", "stopped receiver can listen and pair again on the same port");
+    check(until([&] { return next.state() == QAbstractSocket::UnconnectedState; }, 350), "missing ACK cannot retain an old control socket indefinitely");
+    check(rpc(again, {{"type", "ping"}})["type"] == "pong", "old disconnect deadline cannot close a restarted session");
+    receiver.stopListening();
+}
 }
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv); AudioBuffer buffer;
@@ -246,6 +276,6 @@ int main(int argc, char** argv) {
     check(LanAdvertiser::relevantQuery(query, "x", "y"), "Bonjour browse query recognized");
     QByteArray malicious(12, '\0'); malicious[5] = 1; malicious += QByteArray::fromHex("c00c000c0001");
     check(!LanAdvertiser::relevantQuery(malicious, "x", "y"), "DNS compression loop bounded");
-    receiver.stopListening(); referenceTests(); referenceTimingTests();
+    receiver.stopListening(); referenceTests(); referenceTimingTests(); disconnectHandshakeTests();
     std::cout << "Pairing, first-owner lock, resume, rotation, audio, reference and DNS tests passed\n";
 }
