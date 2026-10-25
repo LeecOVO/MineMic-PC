@@ -14,6 +14,7 @@
 #include <iostream>
 #include <cstdlib>
 #include <algorithm>
+#include <vector>
 #include <QMessageAuthenticationCode>
 #include <QCryptographicHash>
 using namespace minemic;
@@ -176,6 +177,104 @@ void disconnectHandshakeTests() {
     check(rpc(again, {{"type", "ping"}})["type"] == "pong", "old disconnect deadline cannot close a restarted session");
     receiver.stopListening();
 }
+void discoveryBurstTests() {
+    LanAdvertiser advertiser;
+    auto* socket = advertiser.findChild<QUdpSocket*>();
+    check(socket && socket->bind(QHostAddress::LocalHost, 0), "discovery test binds an isolated UDP endpoint");
+    QUdpSocket sender;
+    QByteArray query(12, '\0'); query[5] = 1;
+    query += QByteArray("\x08_minemic\x04_tcp\x05local\0\0\x0c\0\x01", 25);
+    const QByteArray noise(12, '\0');
+    bool firstNotification = false, pendingAfterFirst = false;
+    QObject::connect(socket, &QUdpSocket::readyRead, &advertiser, [&] {
+        if (!firstNotification) {
+            firstNotification = true; pendingAfterFirst = socket->hasPendingDatagrams();
+        }
+    });
+    for (int i = 0; i < 8; ++i)
+        sender.writeDatagram(i == 0 ? query : noise, QHostAddress::LocalHost, socket->localPort());
+    check(until([&] { return firstNotification; }), "discovery receives the first query burst");
+    check(!pendingAfterFirst, "a matching query must not leave a short burst unread after readyRead");
+    // A phone's browse/resolve burst can leave both relevant and unrelated
+    // queries pending in one readyRead notification. Read beyond the first hit.
+    for (int i = 0; i < 80; ++i)
+        check(sender.writeDatagram(i == 0 ? query : noise, QHostAddress::LocalHost, socket->localPort()) > 0,
+              "discovery query burst sent");
+    check(until([&] { return !socket->hasPendingDatagrams(); }, 500), "discovery drains the entire burst after its first matching query");
+    for (int i = 0; i < 80; ++i)
+        sender.writeDatagram(i == 79 ? query : noise, QHostAddress::LocalHost, socket->localPort());
+    check(until([&] { return !socket->hasPendingDatagrams(); }, 500), "discovery continues beyond its per-event work limit");
+    sender.writeDatagram(query, QHostAddress::LocalHost, socket->localPort());
+    check(until([&] { return !socket->hasPendingDatagrams(); }, 500), "subsequent phone discovery still drains without restarting reception");
+}
+void repeatedOwnerReleaseTests() {
+    AudioBuffer buffer; Receiver receiver(buffer); quint16 port = 0; bool locked = false;
+    QObject::connect(&receiver, &Receiver::listening, [&](quint16 value) { port = value; });
+    QObject::connect(&receiver, &Receiver::connectionChanged, [&](bool value, bool) { locked = value; });
+    receiver.startListening(0);
+    std::vector<std::unique_ptr<QTcpSocket>> phones;
+    std::vector<std::unique_ptr<QTcpSocket>> pendingProbes;
+    for (int i = 0; i < 6; ++i) {
+        auto probe = std::make_unique<QTcpSocket>(); connectTo(*probe, port);
+        pendingProbes.push_back(std::move(probe));
+    }
+    for (int attempt = 0; attempt < 24; ++attempt) {
+        // Exercise slot pressure without violating the existing 12/s pairing
+        // rate limit. Idle discovery probes still occupy the other slots.
+        if (attempt && attempt % 10 == 0) until([] { return false; }, 1050);
+        auto phone = std::make_unique<QTcpSocket>(); connectTo(*phone, port);
+        const QString digit = QString::number(attempt % 16, 16);
+        const auto welcome = rpc(*phone, connectRequest(digit.repeated(32), QString(32, 'e'), receiver.pairingCode()));
+        check(welcome["type"] == "welcome" && locked, "code pairing remains available across repeated PC releases");
+        if (attempt % 3 == 0) {
+            phone->abort();
+            check(until([&] { return !phone->isOpen(); }), "killed phone closes its local transport");
+        }
+        const auto code = receiver.pairingCode(); receiver.manualDisconnect();
+        check(!locked && receiver.pairingCode() == code, "PC release clears a live or killed owner's reservation without changing the code");
+        if (attempt % 4 == 0) receiver.refreshPairingCode();
+        // Keep unacknowledged FIN sockets alive to cover immediate reconnects
+        // while their bounded shutdown timers are still pending.
+        phones.push_back(std::move(phone));
+    }
+    QTcpSocket current; connectTo(current, port);
+    check(rpc(current, connectRequest(QString(32, 'f'), QString(32, 'a'), receiver.pairingCode()))["type"] == "welcome",
+          "a new owner pairs after control-slot pressure without stopping reception");
+    check(until([&] {
+        return std::all_of(phones.begin(), phones.end(), [](const auto& phone) {
+            return phone->state() == QAbstractSocket::UnconnectedState;
+        });
+    }, 400), "retired controls are eventually reclaimed under repeated reconnects");
+    check(locked && rpc(current, {{"type", "ping"}})["type"] == "pong", "retired timers cannot close the current owner after control-slot reclamation");
+    receiver.stopListening();
+}
+void coldOwnerRecoveryTests() {
+    AudioBuffer buffer; Receiver receiver(buffer); quint16 port = 0; bool locked = false;
+    QObject::connect(&receiver, &Receiver::listening, [&](quint16 value) { port = value; });
+    QObject::connect(&receiver, &Receiver::connectionChanged, [&](bool value, bool) { locked = value; });
+    receiver.startListening(0); const auto code = receiver.pairingCode();
+    QTcpSocket original; connectTo(original, port);
+    const auto first = rpc(original, connectRequest(QString(32, 'a'), QString(32, 'b'), code));
+    original.abort(); until([] { return false; }, 10);
+    check(locked, "process loss preserves the first owner's reservation");
+    QTcpSocket restarted; connectTo(restarted, port);
+    auto request = connectRequest(QString(32, 'a'), QString(32, 'c'), code);
+    request.insert("token", QString(32, 'd'));
+    check(rpc(restarted, request)["reason"] == "busy", "a persistent identity alone cannot reclaim ownership");
+    request.insert("token", first["token"]);
+    request.insert("code", code == "000000" ? "000001" : "000000");
+    check(rpc(restarted, request)["reason"] == "wrong_code", "cold recovery validates the code before using a saved lease");
+    request.insert("code", code);
+    const auto recovered = rpc(restarted, request);
+    check(recovered["type"] == "welcome" && recovered["session"] != first["session"] && recovered["key"] != first["key"],
+          "a restarted phone with its saved token obtains a fresh audio session");
+    QTcpSocket stranger; connectTo(stranger, port);
+    request.insert("clientId", QString(32, 'e'));
+    check(rpc(stranger, request)["reason"] == "busy", "cold recovery cannot transfer a saved lease to a different identity");
+    check(rpc(restarted, {{"type", "ping"}})["type"] == "pong" && receiver.pairingCode() == code,
+          "cold recovery preserves the active owner and pairing code");
+    receiver.stopListening();
+}
 }
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv); AudioBuffer buffer;
@@ -276,6 +375,6 @@ int main(int argc, char** argv) {
     check(LanAdvertiser::relevantQuery(query, "x", "y"), "Bonjour browse query recognized");
     QByteArray malicious(12, '\0'); malicious[5] = 1; malicious += QByteArray::fromHex("c00c000c0001");
     check(!LanAdvertiser::relevantQuery(malicious, "x", "y"), "DNS compression loop bounded");
-    receiver.stopListening(); referenceTests(); referenceTimingTests(); disconnectHandshakeTests();
+    receiver.stopListening(); referenceTests(); referenceTimingTests(); disconnectHandshakeTests(); discoveryBurstTests(); repeatedOwnerReleaseTests(); coldOwnerRecoveryTests();
     std::cout << "Pairing, first-owner lock, resume, rotation, audio, reference and DNS tests passed\n";
 }

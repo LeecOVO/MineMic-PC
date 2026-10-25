@@ -2,7 +2,7 @@
 
 MineMic 的独立电脑端，采用 C++17 + Qt Widgets，通过局域网接收 [移动端](https://github.com/LeecOVO/MineMic) 的麦克风声音。Windows 优先，支持 macOS 音频输出；Linux 音频后端尚未实现。无需云服务器、账户或 JVM。
 
-当前版本：**0.1.0-ea.6 · Early Access**。项目处于初始开发阶段，版本规则见 [VERSIONING.md](docs/VERSIONING.md)。
+当前版本：**0.1.0-ea.7 · Early Access**。项目处于初始开发阶段，版本规则见 [VERSIONING.md](docs/VERSIONING.md)。
 
 ## 使用
 

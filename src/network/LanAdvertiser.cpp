@@ -35,21 +35,28 @@ bool readName(const QByteArray& bytes, qsizetype& offset, QByteArray& value) {
     return false;
 }
 }
-LanAdvertiser::LanAdvertiser(QObject* parent) : QObject(parent) {
+LanAdvertiser::LanAdvertiser(QObject* parent) : QObject(parent), socket_(this), timer_(this) {
     const auto id = QByteArray::number(QRandomGenerator::system()->generate64(), 16);
     instance_ = "MineMic-" + id + "." + Service; host_ = "minemic-" + id + ".local";
     connect(&timer_, &QTimer::timeout, this, [this] { announce(); });
     connect(&socket_, &QUdpSocket::readyRead, this, [this] {
-        int count = 0;
-        while (socket_.hasPendingDatagrams() && ++count <= 32) {
-            const auto datagram = socket_.receiveDatagram(2048);
-            if (relevantQuery(datagram.data(), instance_, host_) && (!responseTimer_.isValid() || responseTimer_.elapsed() >= 250)) {
-                // Multicast answers are valid for normal mDNS and QU browse requests.
-                announce(); responseTimer_.restart();
-                break;
-            }
-        }
+        if (!drainScheduled_) readPending();
     });
+}
+void LanAdvertiser::readPending() {
+    drainScheduled_ = false;
+    for (int count = 0; count < 32 && socket_.hasPendingDatagrams(); ++count) {
+        const auto datagram = socket_.receiveDatagram(2048);
+        if (relevantQuery(datagram.data(), instance_, host_) && (!responseTimer_.isValid() || responseTimer_.elapsed() >= 250)) {
+            // Rate-limit replies, never reads: leaving an unread datagram can
+            // prevent a subsequent readyRead on some socket backends.
+            announce(); responseTimer_.restart();
+        }
+    }
+    if (socket_.hasPendingDatagrams()) {
+        drainScheduled_ = true;
+        QMetaObject::invokeMethod(this, &LanAdvertiser::readPending, Qt::QueuedConnection);
+    }
 }
 LanAdvertiser::~LanAdvertiser() { if (port_) announce(0); }
 void LanAdvertiser::start(quint16 port) {

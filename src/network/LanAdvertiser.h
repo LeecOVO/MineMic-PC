@@ -16,6 +16,7 @@ public:
 signals:
     void warning(const QString& message);
 private:
+    void readPending();
     void announce(quint32 ttl = 120);
     QByteArray records(quint32 ttl) const;
     QUdpSocket socket_;
@@ -25,5 +26,6 @@ private:
     QList<QHostAddress> addresses_;
     QByteArray instance_, host_;
     quint16 port_ = 0;
+    bool drainScheduled_ = false;
 };
 }

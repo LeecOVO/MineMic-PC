@@ -213,6 +213,15 @@ void Receiver::finishControl(QTcpSocket* client, const QString& reason) {
 void Receiver::acceptControls() {
     while (server_ && server_->hasPendingConnections()) {
         auto* client = server_->nextPendingConnection();
+        if (controls_.size() >= 8 && !closingControls_.isEmpty()) {
+            // A released owner's best-effort FIN must not occupy the last
+            // handshake slot. Retire only a logically closed socket; retain
+            // the hard connection limit and every active owner's reservation.
+            auto* retired = closingControls_.cbegin().key();
+            retired->abort();
+            controls_.remove(retired); closingControls_.remove(retired);
+            retired->deleteLater();
+        }
         if (controls_.size() >= 8) { client->abort(); client->deleteLater(); continue; }
         client->setParent(this); client->setReadBufferSize(4096);
         client->setSocketOption(QAbstractSocket::LowDelayOption, 1); controls_.insert(client, {});
@@ -251,6 +260,7 @@ void Receiver::welcome(QTcpSocket* client, const QString& nonce, bool resume) {
     if (ownerSocket_ && ownerSocket_ != client) ownerSocket_->disconnectFromHost();
     ownerSocket_ = client; peer_ = client->peerAddress(); peerPort_ = 0;
     if (resume || !session_) {
+        connectNonce_ = nonce;
         do { session_ = QRandomGenerator::system()->generate(); } while (!session_);
         key_ = randomBytes(16); haveAudio_ = false; seenSequences_ = 0; buffer_.reset();
     }
@@ -314,7 +324,8 @@ void Receiver::handleControl(QTcpSocket* client, const QJsonObject& m) {
     if (++attempts_ > 12) { reject("rate_limited"); return; }
     if (mode == "code" && m.value("code").toString() != code_) { reject("wrong_code"); return; }
     if (!clientId_.isEmpty()) {
-        if (id == clientId_ && nonce == connectNonce_ && client->peerAddress() == peer_) welcome(client, nonce, false);
+        if (id == clientId_ && sameBytes(m.value("token").toString().toLatin1(), token_.toLatin1())) welcome(client, nonce, true);
+        else if (id == clientId_ && nonce == connectNonce_ && client->peerAddress() == peer_) welcome(client, nonce, false);
         else reject("busy");
         return;
     }
