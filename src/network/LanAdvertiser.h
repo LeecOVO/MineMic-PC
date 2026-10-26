@@ -16,16 +16,17 @@ public:
 signals:
     void warning(const QString& message);
 private:
-    void readPending();
+    void readPending(QUdpSocket& socket, bool& scheduled);
     void announce(quint32 ttl = 120);
-    QByteArray records(quint32 ttl) const;
+    QByteArray records(quint32 ttl, const QNetworkInterface& interface) const;
     QUdpSocket socket_;
+    QUdpSocket socket6_;
     QTimer timer_;
     QElapsedTimer responseTimer_;
     QList<QNetworkInterface> interfaces_;
-    QList<QHostAddress> addresses_;
+    QList<QNetworkInterface> interfaces6_;
     QByteArray instance_, host_;
     quint16 port_ = 0;
-    bool drainScheduled_ = false;
+    bool drainScheduled_ = false, drain6Scheduled_ = false;
 };
 }

@@ -153,12 +153,13 @@ void Receiver::startListening(quint16 port) {
     if (listening_) { emit listening(server_->serverPort()); return; }
     stopListening(); rejected_ = 0; attempts_ = 0; attemptsWindow_.start();
     server_ = new QTcpServer(this); server_->setMaxPendingConnections(8);
-    if (!server_->listen(QHostAddress::AnyIPv4, port)) {
+    if (!server_->listen(QHostAddress::Any, port) && !server_->listen(QHostAddress::AnyIPv4, port)) {
         auto message = server_->errorString(); delete server_; server_ = nullptr;
         emit errorOccurred(tr("无法监听控制端口：%1").arg(message)); return;
     }
     socket_ = new QUdpSocket(this);
-    if (!socket_->bind(QHostAddress::AnyIPv4, server_->serverPort(), QAbstractSocket::DontShareAddress)) {
+    const auto bindAddress = server_->serverAddress() == QHostAddress::AnyIPv4 ? QHostAddress::AnyIPv4 : QHostAddress::Any;
+    if (!socket_->bind(bindAddress, server_->serverPort(), QAbstractSocket::DontShareAddress)) {
         auto message = socket_->errorString(); stopListening();
         emit errorOccurred(tr("无法监听音频端口：%1").arg(message)); return;
     }
@@ -343,7 +344,7 @@ void Receiver::receivePending() {
         }
         const auto datagram = socket_->receiveDatagram();
         const auto bytes = datagram.data(), body = bytes.first(bytes.size() - TagSize);
-        if (datagram.senderAddress() != peer_ || (peerPort_ && datagram.senderPort() != peerPort_) ||
+        if (!datagram.senderAddress().isEqual(peer_, QHostAddress::ConvertV4MappedToIPv4) || (peerPort_ && datagram.senderPort() != peerPort_) ||
             !sameBytes(bytes.last(TagSize), QMessageAuthenticationCode::hash(body, key_, QCryptographicHash::Sha256))) { ++rejected_; continue; }
         Packet packet;
         if (!decodePacket(reinterpret_cast<const std::uint8_t*>(body.constData()), body.size(), packet) || packet.session != session_) { ++rejected_; continue; }

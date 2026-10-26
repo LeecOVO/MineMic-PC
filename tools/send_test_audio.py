@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MineMic v2 test sender: explicit PC IPv4, optional six-digit code, synthetic PCM/WAV."""
+"""MineMic v2 test sender: explicit PC IPv4/IPv6, optional six-digit code, synthetic PCM/WAV."""
 import argparse
 import hmac
 import json
@@ -60,7 +60,7 @@ def main():
     source = wave.open(args.wav, 'rb') if args.wav else None
     if source and (source.getnchannels(), source.getsampwidth(), source.getframerate(), source.getcomptype()) != (1, 2, RATE, 'NONE'):
         parser.error('Need 48 kHz mono PCM16 WAV')
-    with socket.create_connection((args.host, args.port), timeout=3) as tcp, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+    with socket.create_connection((args.host.strip('[]'), args.port), timeout=3) as tcp, socket.socket(tcp.family, socket.SOCK_DGRAM) as udp:
         stream = tcp.makefile('rwb')
         client_id, nonce = secrets.token_hex(16), secrets.token_hex(16)
         welcome = control(stream, type='connect', mode='code' if args.code else 'manual', code=args.code,
@@ -68,7 +68,8 @@ def main():
         if welcome.get('type') != 'welcome' or welcome.get('nonce') != nonce:
             raise RuntimeError('Pairing refused: ' + welcome.get('reason', 'invalid response'))
         key, session = bytes.fromhex(welcome['key']), int(welcome['session'])
-        udp.connect((args.host, int(welcome['port'])))
+        peer = tcp.getpeername()
+        udp.connect((peer[0], int(welcome['port']), *peer[2:]))
         reference_packets = 0
         try:
             if args.reference:

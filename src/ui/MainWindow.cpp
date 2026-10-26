@@ -104,11 +104,14 @@ MainWindow::MainWindow() : output_(createAudioOutput()) {
     for (const auto& interface : QNetworkInterface::allInterfaces()) {
         if (!(interface.flags() & QNetworkInterface::IsUp) || interface.flags() & QNetworkInterface::IsLoopBack) continue;
         for (const auto& entry : interface.addressEntries()) {
-            if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol)
-                addresses_->addItem(entry.ip().toString());
+            if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol || entry.ip().protocol() == QAbstractSocket::IPv6Protocol) {
+                auto address = entry.ip(); address.setScopeId({});
+                if (addresses_->findText(address.toString()) < 0) addresses_->addItem(address.toString());
+            }
         }
     }
     if (!addresses_->count()) addresses_->addItem(QStringLiteral("127.0.0.1"));
+    addresses_->setToolTip(tr("支持 IPv4 和 IPv6；链路本地 IPv6 的接口由手机自动选择，不要复制电脑的接口编号。"));
     form->addRow(tr("电脑地址"), addresses_);
     port_ = new QSpinBox; port_->setRange(48721, 48721);
     port_->setReadOnly(true); port_->setButtonSymbols(QAbstractSpinBox::NoButtons);

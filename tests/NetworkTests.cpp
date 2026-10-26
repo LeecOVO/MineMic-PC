@@ -5,6 +5,7 @@
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QJsonDocument>
+#include <QNetworkDatagram>
 #include <QProcess>
 #include <QTcpSocket>
 #include <QUdpSocket>
@@ -25,8 +26,8 @@ bool until(const std::function<bool()>& f, int ms = 1800) {
     do { QCoreApplication::processEvents(QEventLoop::AllEvents, 5); if (f()) return true; QThread::msleep(1); } while (timer.elapsed() < ms);
     return false;
 }
-void connectTo(QTcpSocket& socket, quint16 port) {
-    socket.connectToHost(QHostAddress::LocalHost, port);
+void connectTo(QTcpSocket& socket, quint16 port, const QHostAddress& host = QHostAddress::LocalHost) {
+    socket.connectToHost(host, port);
     check(until([&] { return socket.state() == QAbstractSocket::ConnectedState; }), "TCP connected");
 }
 QJsonObject rpc(QTcpSocket& socket, QJsonObject request) {
@@ -178,9 +179,11 @@ void disconnectHandshakeTests() {
     receiver.stopListening();
 }
 void discoveryBurstTests() {
+    for (const bool ipv6 : {false, true}) {
     LanAdvertiser advertiser;
-    auto* socket = advertiser.findChild<QUdpSocket*>();
-    check(socket && socket->bind(QHostAddress::LocalHost, 0), "discovery test binds an isolated UDP endpoint");
+    const auto host = ipv6 ? QHostAddress::LocalHostIPv6 : QHostAddress::LocalHost;
+    auto* socket = advertiser.findChild<QUdpSocket*>(ipv6 ? QStringLiteral("mdns-ipv6") : QStringLiteral("mdns-ipv4"));
+    check(socket && socket->bind(host, 0), "discovery test binds an isolated IPv4/IPv6 UDP endpoint");
     QUdpSocket sender;
     QByteArray query(12, '\0'); query[5] = 1;
     query += QByteArray("\x08_minemic\x04_tcp\x05local\0\0\x0c\0\x01", 25);
@@ -192,20 +195,54 @@ void discoveryBurstTests() {
         }
     });
     for (int i = 0; i < 8; ++i)
-        sender.writeDatagram(i == 0 ? query : noise, QHostAddress::LocalHost, socket->localPort());
+        sender.writeDatagram(i == 0 ? query : noise, host, socket->localPort());
     check(until([&] { return firstNotification; }), "discovery receives the first query burst");
     check(!pendingAfterFirst, "a matching query must not leave a short burst unread after readyRead");
     // A phone's browse/resolve burst can leave both relevant and unrelated
     // queries pending in one readyRead notification. Read beyond the first hit.
     for (int i = 0; i < 80; ++i)
-        check(sender.writeDatagram(i == 0 ? query : noise, QHostAddress::LocalHost, socket->localPort()) > 0,
+        check(sender.writeDatagram(i == 0 ? query : noise, host, socket->localPort()) > 0,
               "discovery query burst sent");
     check(until([&] { return !socket->hasPendingDatagrams(); }, 500), "discovery drains the entire burst after its first matching query");
     for (int i = 0; i < 80; ++i)
-        sender.writeDatagram(i == 79 ? query : noise, QHostAddress::LocalHost, socket->localPort());
+        sender.writeDatagram(i == 79 ? query : noise, host, socket->localPort());
     check(until([&] { return !socket->hasPendingDatagrams(); }, 500), "discovery continues beyond its per-event work limit");
-    sender.writeDatagram(query, QHostAddress::LocalHost, socket->localPort());
+    sender.writeDatagram(query, host, socket->localPort());
     check(until([&] { return !socket->hasPendingDatagrams(); }, 500), "subsequent phone discovery still drains without restarting reception");
+    }
+}
+
+void ipv6SessionTests() {
+    AudioBuffer buffer;
+    Receiver receiver(buffer, nullptr, std::make_unique<TestReference>()); quint16 port = 0;
+    QObject::connect(&receiver, &Receiver::listening, [&](quint16 value) { port = value; });
+    receiver.startListening(0); check(port != 0, "dual-stack listener starts");
+    const auto code = receiver.pairingCode();
+    QTcpSocket owner, other; connectTo(owner, port, QHostAddress::LocalHostIPv6); connectTo(other, port);
+    auto welcome = rpc(owner, connectRequest(QString(32, 'a'), QString(32, 'b'), code));
+    check(welcome["type"] == "welcome", "IPv6 code pairing succeeds");
+    check(rpc(other, connectRequest(QString(32, 'c'), QString(32, 'd'), code))["reason"] == "busy", "IPv4 cannot steal IPv6 ownership");
+    auto key = QByteArray::fromHex(welcome["key"].toString().toLatin1());
+    QUdpSocket audio; check(audio.bind(QHostAddress::LocalHostIPv6, 0), "IPv6 audio bound");
+    Packet packet; packet.type = PacketType::Audio; packet.session = welcome["session"].toString().toUInt(); packet.payload.resize(MaxPayload);
+    audio.writeDatagram(Receiver::authenticate(packet, key), QHostAddress::LocalHostIPv6, port);
+    check(until([&] { return buffer.stats().accepted == 1; }), "authenticated microphone audio arrives over IPv6");
+    check(rpc(owner, {{"type", "reference"}, {"enabled", "1"}})["state"] == "starting", "IPv6 reference requested");
+    check(until([&] { return audio.hasPendingDatagrams(); }), "PC returns reference over IPv6");
+    const auto reference = audio.receiveDatagram().data();
+    check(reference.size() == 1040 && reference.first(4) == "MREF" &&
+          reference.last(32) == QMessageAuthenticationCode::hash(reference.first(1008), key, QCryptographicHash::Sha256), "IPv6 reference authenticates");
+    const auto token = welcome["token"];
+    owner.abort(); QCoreApplication::processEvents();
+    QTcpSocket resumed; connectTo(resumed, port, QHostAddress::LocalHostIPv6);
+    welcome = rpc(resumed, {{"type", "resume"}, {"clientId", QString(32, 'a')}, {"token", token}, {"nonce", QString(32, 'e')}});
+    check(welcome["type"] == "welcome" && receiver.pairingCode() == code, "IPv6 owner resumes without rotating code");
+    check(rpc(resumed, {{"type", "disconnect"}, {"clientId", QString(32, 'a')}, {"token", token}})["type"] == "disconnected", "IPv6 disconnect acknowledged");
+    check(rpc(other, connectRequest(QString(32, 'c'), QString(32, 'd'), code))["type"] == "welcome", "IPv4 can pair after IPv6 owner releases");
+    receiver.stopListening();
+    QByteArray query(12, '\0'); query[5] = 1;
+    query += QByteArray("\x01x\0\0\x1c\0\x01", 7);
+    check(LanAdvertiser::relevantQuery(query, "instance", "x"), "mDNS responds to AAAA queries");
 }
 void repeatedOwnerReleaseTests() {
     AudioBuffer buffer; Receiver receiver(buffer); quint16 port = 0; bool locked = false;
@@ -279,7 +316,7 @@ void coldOwnerRecoveryTests() {
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv); AudioBuffer buffer;
     const bool waitingFixture = argc > 1 && QString::fromLocal8Bit(argv[1]) == "--serve-reference-waiting";
-    const bool referenceFixture = waitingFixture || (argc > 1 && (QString::fromLocal8Bit(argv[1]) == "--serve-reference" || QString::fromLocal8Bit(argv[1]) == "--python-reference-sender"));
+    const bool referenceFixture = waitingFixture || (argc > 1 && (QString::fromLocal8Bit(argv[1]) == "--serve-reference" || QString::fromLocal8Bit(argv[1]) == "--python-reference-sender" || QString::fromLocal8Bit(argv[1]) == "--python-ipv6-reference-sender"));
     std::unique_ptr<AudioReference> reference;
     if (referenceFixture) {
         auto source = std::make_unique<TestReference>(); source->available = !waitingFixture;
@@ -297,9 +334,10 @@ int main(int argc, char** argv) {
         return app.exec();
     }
     check(code.size() == 6 && std::all_of(code.begin(), code.end(), [](QChar c) { return c >= '0' && c <= '9'; }), "exactly six decimal digits");
-    if (argc == 4 && (QString::fromLocal8Bit(argv[1]) == "--python-sender" || QString::fromLocal8Bit(argv[1]) == "--python-reference-sender")) {
+    const auto mode = argc > 1 ? QString::fromLocal8Bit(argv[1]) : QString();
+    if (argc == 4 && (mode == "--python-sender" || mode == "--python-reference-sender" || mode == "--python-ipv6-sender" || mode == "--python-ipv6-reference-sender")) {
         QProcess sender;
-        QStringList arguments{QString::fromLocal8Bit(argv[3]), "127.0.0.1", "--port", QString::number(port), "--code", code, "--seconds", "0.3"};
+        QStringList arguments{QString::fromLocal8Bit(argv[3]), mode.contains("ipv6") ? "::1" : "127.0.0.1", "--port", QString::number(port), "--code", code, "--seconds", "0.3"};
         if (referenceFixture) arguments << "--reference";
         sender.start(QString::fromLocal8Bit(argv[2]), arguments);
         check(sender.waitForStarted(2000), "Python starts"); std::uint64_t maximum = 0;
@@ -375,6 +413,6 @@ int main(int argc, char** argv) {
     check(LanAdvertiser::relevantQuery(query, "x", "y"), "Bonjour browse query recognized");
     QByteArray malicious(12, '\0'); malicious[5] = 1; malicious += QByteArray::fromHex("c00c000c0001");
     check(!LanAdvertiser::relevantQuery(malicious, "x", "y"), "DNS compression loop bounded");
-    receiver.stopListening(); referenceTests(); referenceTimingTests(); disconnectHandshakeTests(); discoveryBurstTests(); repeatedOwnerReleaseTests(); coldOwnerRecoveryTests();
+    receiver.stopListening(); referenceTests(); referenceTimingTests(); disconnectHandshakeTests(); discoveryBurstTests(); repeatedOwnerReleaseTests(); coldOwnerRecoveryTests(); ipv6SessionTests();
     std::cout << "Pairing, first-owner lock, resume, rotation, audio, reference and DNS tests passed\n";
 }
